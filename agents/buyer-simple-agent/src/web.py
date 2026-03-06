@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+import httpx
 
 load_dotenv()
 
@@ -178,7 +179,7 @@ async def chat(request: Request):
 @app.get("/api/sellers")
 async def get_sellers():
     """Return all registered sellers."""
-    return JSONResponse(content=seller_registry.list_all())
+    return JSONResponse(content=seller_registry.list_all(verbose=True))
 
 
 @app.get("/api/balance")
@@ -196,8 +197,60 @@ async def get_balance():
 async def get_config():
     """Return non-secret frontend configuration loaded from env/Secrets Manager."""
     return JSONResponse(content={
-        "zeroclickPlacementId": os.getenv("ZEROCLICK_PLACEMENT_ID", ""),
+        "zeroclickEnabled": bool(os.getenv("ZEROCLICK_API_KEY")),
+        "zeroclickQuery": os.getenv("ZEROCLICK_QUERY", "AI tools for business"),
     })
+
+
+@app.get("/api/zeroclick/offers")
+async def get_zeroclick_offers(request: Request):
+    """Fetch ZeroClick offers server-side using the configured API key."""
+    api_key = os.getenv("ZEROCLICK_API_KEY", "").strip()
+    if not api_key:
+        return JSONResponse(
+            content={"error": "ZeroClick API key not configured", "offers": []},
+            status_code=503,
+        )
+
+    query = (request.query_params.get("query") or os.getenv("ZEROCLICK_QUERY", "")).strip()
+    if not query:
+        query = "AI tools for business"
+
+    payload = {
+        "method": "server",
+        "ipAddress": (request.client.host if request.client else "127.0.0.1"),
+        "userAgent": request.headers.get("user-agent", ""),
+        "query": query,
+        "limit": 1,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://zeroclick.dev/api/v2/offers",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-zc-api-key": api_key,
+                },
+                json=payload,
+            )
+            resp.raise_for_status()
+            offers = resp.json()
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:300]
+        log(_logger, "WEB", "ERROR", f"zeroclick offers http={exc.response.status_code} detail={detail}")
+        return JSONResponse(
+            content={"error": f"ZeroClick offers failed: HTTP {exc.response.status_code}", "offers": []},
+            status_code=502,
+        )
+    except Exception as exc:
+        log(_logger, "WEB", "ERROR", f"zeroclick offers request failed: {exc}")
+        return JSONResponse(
+            content={"error": f"ZeroClick offers request failed: {exc}", "offers": []},
+            status_code=502,
+        )
+
+    return JSONResponse(content={"offers": offers})
 
 
 @app.get("/ping")

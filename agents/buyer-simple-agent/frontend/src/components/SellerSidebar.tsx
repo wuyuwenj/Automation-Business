@@ -30,34 +30,46 @@ export default function SellerSidebar({ sellers }: SellerSidebarProps) {
           )}
           {sellers.map((seller) => (
             <Card key={seller.url} className="shadow-none">
-              <CardHeader className="p-3 pb-1">
-                <CardTitle className="text-sm">{seller.name}</CardTitle>
-                {seller.description && (
-                  <p className="text-xs text-muted-foreground leading-snug line-clamp-2">
-                    {seller.description}
-                  </p>
-                )}
-              </CardHeader>
-              <CardContent className="p-3 pt-2 space-y-2">
-                {seller.skills.length > 0 && (
-                  <div className="flex flex-wrap gap-1">
-                    {seller.skills.map((skill) => (
-                      <Badge
-                        key={skill}
-                        variant="secondary"
-                        className="text-[10px] bg-primary/10 text-primary border-0 font-medium"
-                      >
-                        {skill}
-                      </Badge>
-                    ))}
-                  </div>
-                )}
-                <div className="flex items-center justify-between text-xs text-muted-foreground">
-                  <span>
-                    {seller.cost_description || `${seller.credits} credit${seller.credits !== 1 ? "s" : ""}`}
-                  </span>
-                </div>
-              </CardContent>
+              {(() => {
+                const tags = seller.skills?.length
+                  ? seller.skills
+                  : seller.keywords?.length
+                    ? seller.keywords
+                    : [];
+
+                return (
+                  <>
+                    <CardHeader className="p-3 pb-1">
+                      <CardTitle className="text-sm">{seller.name}</CardTitle>
+                      {seller.description && (
+                        <p className="text-xs text-muted-foreground leading-snug line-clamp-2">
+                          {seller.description}
+                        </p>
+                      )}
+                    </CardHeader>
+                    <CardContent className="p-3 pt-2 space-y-2">
+                      {tags.length > 0 && (
+                        <div className="flex flex-wrap gap-1">
+                          {tags.map((tag) => (
+                            <Badge
+                              key={tag}
+                              variant="secondary"
+                              className="text-[10px] bg-primary/10 text-primary border-0 font-medium"
+                            >
+                              {tag}
+                            </Badge>
+                          ))}
+                        </div>
+                      )}
+                      <div className="flex items-center justify-between text-xs text-muted-foreground">
+                        <span>
+                          {seller.cost_description || `${seller.credits} credit${seller.credits !== 1 ? "s" : ""}`}
+                        </span>
+                      </div>
+                    </CardContent>
+                  </>
+                );
+              })()}
             </Card>
           ))}
         </div>
