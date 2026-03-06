@@ -411,9 +411,10 @@ def main():
         port=port,
         hooks=hooks,
         custom_request_handler=handler,
-        host="0.0.0.0",
     )
 
+    # Override uvicorn host to bind to all interfaces (for EC2/remote hosting)
+    result.server.config.host = "0.0.0.0"
     asyncio.run(result.server.serve())
 
 
