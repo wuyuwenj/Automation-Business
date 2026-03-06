@@ -1,0 +1,14 @@
+[Unit]
+Description=Creative Generation Selling Agent
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/creative-gen-agent
+Environment=PYTHONPATH=.
+ExecStart=/opt/creative-gen-agent/.venv/bin/python -m src.agent
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

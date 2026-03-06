@@ -1,0 +1,31 @@
+[tool.poetry]
+name = "creative-gen-agent"
+version = "0.1.0"
+description = "Creative generation selling agent with x402 payment-protected tools"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.10"
+strands-agents = {version = ">=1.0.0", extras = ["openai", "a2a"]}
+payments-py = {version = ">=1.3.3", extras = ["strands"]}
+fastapi = "^0.120.0"
+uvicorn = ">=0.34.2,<1.0.0"
+httpx = "^0.28.0"
+openai = "^1.40.0"
+python-dotenv = "^1.0.0"
+boto3 = "^1.39.0"
+
+[tool.poetry.extras]
+agentcore = ["bedrock-agentcore"]
+
+[tool.poetry.scripts]
+agent = "src.agent:main"
+agent-agentcore = "src.agent_agentcore:main"
+client = "src.client:main"
+demo = "src.demo:main"
+agent-a2a = "src.agent_a2a:main"
+agent-a2a-agentcore = "src.agent_a2a_agentcore:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
