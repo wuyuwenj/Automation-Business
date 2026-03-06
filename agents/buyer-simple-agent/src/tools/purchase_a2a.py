@@ -11,6 +11,7 @@ from payments_py import Payments
 from payments_py.a2a.payments_client import PaymentsClient
 
 from ..log import get_logger, log
+from ..payment_diagnostics import diagnose_error
 from .token_options import build_token_options
 
 # Pluggable client class — override with set_client_class() for AgentCore
@@ -108,6 +109,9 @@ def purchase_a2a_impl(
         return _error(f"Cannot connect to agent at {agent_url}. Is it running?")
     except Exception as e:
         log(_logger, "A2A_CLIENT", "ERROR", f"purchase failed: {e}")
+        diagnosis = diagnose_error(str(e))
+        if diagnosis:
+            log(_logger, "A2A_CLIENT", "DIAG", diagnosis)
         return _error(f"A2A purchase failed: {e}")
 
 
@@ -180,6 +184,11 @@ def purchase_http_impl(
         if resp.status_code >= 400:
             log(_logger, "HTTP_CLIENT", "ERROR",
                 f"HTTP {resp.status_code}: {resp.text[:200]}")
+            diagnosis = diagnose_error(
+                f"HTTP {resp.status_code}: {resp.text[:300]}"
+            )
+            if diagnosis:
+                log(_logger, "HTTP_CLIENT", "DIAG", diagnosis)
             return _error(
                 f"Seller returned HTTP {resp.status_code}: {resp.text[:300]}"
             )
@@ -220,6 +229,9 @@ def purchase_http_impl(
         return _error(f"Cannot connect to seller at {agent_url}.")
     except Exception as e:
         log(_logger, "HTTP_CLIENT", "ERROR", f"purchase failed: {e}")
+        diagnosis = diagnose_error(str(e))
+        if diagnosis:
+            log(_logger, "HTTP_CLIENT", "DIAG", diagnosis)
         return _error(f"HTTP purchase failed: {e}")
 
 
@@ -302,6 +314,9 @@ def _extract_from_events(events: list) -> dict:
             message = getattr(status, "message", None)
             parts = getattr(message, "parts", []) if message else []
             msg_text = _extract_text_from_parts(parts)
+            diagnosis = diagnose_error(msg_text or "Agent task failed.")
+            if diagnosis:
+                log(_logger, "A2A_CLIENT", "DIAG", diagnosis)
             return _error(msg_text or "Agent task failed.")
 
     return _success("Agent completed the task but returned no text.")

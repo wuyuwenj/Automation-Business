@@ -55,6 +55,7 @@ ACTION_COLORS = {
     "DISCOVER": CYAN,
     "PURCHASE": YELLOW,
     "BALANCE": CYAN,
+    "DIAG": RED,
 }
 
 

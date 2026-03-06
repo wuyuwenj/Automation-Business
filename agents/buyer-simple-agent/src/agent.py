@@ -20,17 +20,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from strands.models.openai import OpenAIModel
-
+from .openai_compat import create_openai_model, validate_openai_config
 from .strands_agent import create_agent, NVM_PLAN_ID, SELLER_URL, seller_registry
 from .registration_server import start_registration_server
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 BUYER_PORT = int(os.getenv("BUYER_PORT", "8000"))
 DEFAULT_MODE = os.getenv("BUYER_AGENT_MODE", "a2a")
 
-if not OPENAI_API_KEY:
-    print("OPENAI_API_KEY is required. Set it in .env file.")
+config_error = validate_openai_config()
+if config_error:
+    print(config_error)
     sys.exit(1)
 
 
@@ -57,10 +56,7 @@ def main():
     mode = args.mode
     port = args.port
 
-    model = OpenAIModel(
-        client_args={"api_key": OPENAI_API_KEY},
-        model_id=os.getenv("MODEL_ID", "gpt-4o-mini"),
-    )
+    model = create_openai_model()
     agent = create_agent(model, mode=mode)
 
     # Start registration server in A2A mode
@@ -71,6 +67,9 @@ def main():
     print("Data Buying Agent — Interactive CLI")
     print("=" * 60)
     print(f"Mode: {mode}")
+    if os.getenv("OPENAI_BASE_URL"):
+        print(f"LLM endpoint: {os.getenv('OPENAI_BASE_URL')}")
+    print(f"Model: {os.getenv('MODEL_ID', 'gpt-4o-mini')}")
     print(f"Plan ID: {NVM_PLAN_ID}")
     if mode in ("a2a", "smart"):
         print(f"Registration: http://localhost:{port} (sellers register here)")
@@ -103,6 +102,7 @@ def main():
             break
 
         try:
+            agent.messages.clear()
             result = agent(user_input)
             print(f"\nAgent: {result}\n")
         except Exception as e:
