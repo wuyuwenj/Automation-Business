@@ -1,117 +1,156 @@
-# Nevermined AI Agent Examples
+# Automation Business
 
-Working examples of AI agents with [Nevermined](https://nevermined.app) payment integration. Each agent demonstrates a different protocol (x402, A2A, MCP) and can be run locally with a few commands.
+A marketplace-style collection of buyer and seller AI agents built around Nevermined payments, x402, A2A, and AWS deployment paths.
+
+The repo is centered on one buyer experience and several sell-side agents:
+
+- A buyer agent that discovers sellers, evaluates options, purchases results, and exposes a React chat UI.
+- Multiple seller agents that monetize data, research, scraping, crypto intelligence, and creative generation.
+- Supporting examples for MCP, Strands, evaluation, and deployment workflows.
+
+## Live Demo
+
+- Buyer web frontend: https://kwckssvkpx.us-west-2.awsapprunner.com/
+
+The hosted buyer UI is backed by the buyer web server in [`agents/buyer-simple-agent`](./agents/buyer-simple-agent/). It also supports ZeroClick offer placement through the server-side `/api/zeroclick/offers` integration when `ZEROCLICK_API_KEY` is configured.
+
+## Repo Map
+
+### Buyer Agent
+
+| Agent | What it does | Interfaces | Link |
+| --- | --- | --- | --- |
+| `buyer-simple-agent` | Discovers sellers, filters/selects them, buys results over x402 or A2A, tracks budget/ledger, and powers the web UI | CLI, FastAPI, SSE chat UI, App Runner, AgentCore, LangGraph, TS example | [README](./agents/buyer-simple-agent/README.md) |
+
+### Seller Agents
+
+| Agent | What it sells | Main tools / endpoints | Interfaces | Link |
+| --- | --- | --- | --- | --- |
+| `seller-simple-agent` | General research/data responses | `search_data`, `summarize_data`, `research_data` via `/data` | x402 HTTP, A2A, AgentCore, LangGraph, TS example | [README](./agents/seller-simple-agent/README.md) |
+| `creative-gen-agent` | Creative assets | ad copy, brand strategy, landing page generation via `/creative` | x402 HTTP, A2A, AgentCore | [creative-gen-agent](./agents/creative-gen-agent/) |
+| `crypto-market-agent` | Crypto and DeFi intelligence | `price_check`, `market_analysis`, `defi_report` via `/data` | x402 HTTP, A2A | [crypto-market-agent](./agents/crypto-market-agent/) |
+| `web-scraper-agent` | Paid web extraction | `scrape_url`, `batch_scrape`, `deep_extract` via `/data` | x402 HTTP, A2A | [web-scraper-agent](./agents/web-scraper-agent/) |
+
+### Supporting Agents and Examples
+
+| Project | Purpose | Link |
+| --- | --- | --- |
+| `agent-evaluator` | Discovers, health-checks, and ranks agents | [agent-evaluator](./agents/agent-evaluator/) |
+| `mcp-server-agent` | Monetized MCP tools with Nevermined | [README](./agents/mcp-server-agent/README.md) |
+| `strands-simple-agent` | Minimal Strands + x402 reference implementation | [README](./agents/strands-simple-agent/README.md) |
+
+## Marketplace Flow
+
+1. Start one or more seller agents.
+2. Run the buyer agent in CLI or web mode.
+3. The buyer discovers sellers from A2A registration or marketplace discovery.
+4. The buyer checks plans/budget, acquires payment tokens, then purchases the selected seller capability.
+5. Results, spend, and seller performance are tracked in the buyer ledger and UI.
 
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.10+
-- [Poetry](https://python-poetry.org/) for dependency management
-- [Nevermined App](https://nevermined.app) account (API key + payment plan)
-- OpenAI API key (or other LLM provider)
+- Poetry
+- Node.js 20+ for the React frontend and TypeScript examples
+- Nevermined API key and plan(s)
+- OpenAI API key
 
-### Environment Setup
+### Shared Setup
 
-Each agent has its own `.env.example`. Copy and fill it in:
+Each agent has its own `.env.example`.
 
 ```bash
 cd agents/<agent-name>
 cp .env.example .env
-# Edit .env with your credentials
 ```
 
-Key variables:
+Common variables:
 
 ```bash
-NVM_API_KEY=sandbox:your-api-key       # From https://nevermined.app > API Keys
-NVM_ENVIRONMENT=sandbox                # sandbox, staging_sandbox, or live
-NVM_PLAN_ID=your-plan-id              # Create in Nevermined App > My Pricing Plans
-OPENAI_API_KEY=sk-your-key            # For LLM-powered agents
+NVM_API_KEY=sandbox:your-api-key
+NVM_ENVIRONMENT=sandbox
+NVM_PLAN_ID=did:nv:...
+OPENAI_API_KEY=sk-...
 ```
 
-## Agents
+### Run the Local Buyer + Seller Pair
 
-| Agent | Description | Protocols | Link |
-|-------|-------------|-----------|------|
-| **Buyer Agent** | Discovers sellers, purchases data, tracks spending | x402, A2A | [README](./agents/buyer-simple-agent/) |
-| **Seller Agent** | Sells data/services with tiered pricing | x402, A2A | [README](./agents/seller-simple-agent/) |
-| **MCP Server** | Payment-protected tools via MCP protocol | MCP, x402 | [README](./agents/mcp-server-agent/) |
-| **Strands Agent** | Strands SDK agent with payment-protected tools | x402 | [README](./agents/strands-simple-agent/) |
-
-### Buyer Agent (`agents/buyer-simple-agent/`)
-
-Discovers sellers in an A2A marketplace, purchases data autonomously, and tracks spending with budget limits. Includes a React web frontend for interactive use.
-
-```bash
-cd agents/buyer-simple-agent
-poetry install
-poetry run python -m src.agent          # Interactive CLI (A2A mode)
-poetry run python -m src.web            # Web server + React frontend
-```
-
-### Seller Agent (`agents/seller-simple-agent/`)
-
-Sells data and services with tiered pricing (1, 5, 10 credits). Supports both HTTP (x402 middleware) and A2A modes with auto-registration to buyer marketplaces.
+Seller:
 
 ```bash
 cd agents/seller-simple-agent
 poetry install
-poetry run python -m src.agent          # HTTP server (x402)
-poetry run python -m src.agent_a2a      # A2A server
+poetry run agent-a2a
 ```
 
-### MCP Server Agent (`agents/mcp-server-agent/`)
-
-MCP server with payment-protected tools (search, summarize, research). Includes a setup script that programmatically registers the agent and creates a payment plan.
+Buyer CLI:
 
 ```bash
-cd agents/mcp-server-agent
+cd agents/buyer-simple-agent
 poetry install
-poetry run python -m src.setup          # Register agent + create plan
-poetry run python -m src.server         # Start MCP server (port 3000)
+poetry run agent
 ```
 
-### Strands Agent (`agents/strands-simple-agent/`)
-
-Strands SDK agent with x402 payment-protected tools and full payment discovery flow. Demonstrates the `@requires_payment` decorator pattern.
+Buyer web server:
 
 ```bash
-cd agents/strands-simple-agent
-poetry install
-poetry run python agent.py              # Run agent
-poetry run python demo.py               # Run demo
+cd agents/buyer-simple-agent
+poetry run web
 ```
 
-## Protocols
+Buyer frontend dev server:
 
-### x402 (HTTP Payment Protocol)
+```bash
+cd agents/buyer-simple-agent/frontend
+npm install
+npm run dev
+```
 
-Payment negotiation via HTTP headers. The client sends a `payment-signature` header with an access token. If missing, the server returns `402 Payment Required` with a `payment-required` header describing what's needed.
+## Buyer Agent Surfaces
 
-### A2A (Agent-to-Agent)
+The buyer implementation in [`agents/buyer-simple-agent`](./agents/buyer-simple-agent/) includes:
 
-Standard agent discovery via `/.well-known/agent.json` and JSON-RPC messaging with payment extensions. Agents can auto-register with buyer marketplaces.
+- Interactive CLI buyer flow: `poetry run agent`
+- Web server + React UI: `poetry run web`
+- Scripted demos: `poetry run client`, `poetry run client-a2a`, `poetry run demo`
+- LangGraph mode: `poetry run agent-langgraph`
+- AWS App Runner deployment config: [`agents/buyer-simple-agent/apprunner.yaml`](./agents/buyer-simple-agent/apprunner.yaml)
+- AWS AgentCore entrypoint: [`agents/buyer-simple-agent/src/web_agentcore.py`](./agents/buyer-simple-agent/src/web_agentcore.py)
+- TypeScript buyer example: [`agents/buyer-simple-agent/ts`](./agents/buyer-simple-agent/ts)
 
-### MCP (Model Context Protocol)
+The buyer web server exposes:
 
-Tool/plugin monetization with logical URLs (e.g., `mcp://server/tools/search`). Each tool can have independent credit pricing.
+- `POST /api/chat`
+- `GET /api/sellers`
+- `GET /api/balance`
+- `GET /api/logs/stream`
+- `GET /api/config`
+- `GET /api/zeroclick/offers`
 
-## Documentation
+## Seller Agent Pricing
 
-- [Getting Started](./docs/getting-started.md) — Environment setup and first agent
-- [AWS Integration](./docs/aws-integration.md) — Strands SDK + AgentCore deployment
-- [Deploy to AgentCore](./docs/deploy-to-agentcore.md) — Step-by-step AgentCore deployment with Nevermined payments
+| Agent | 1 credit | 5 credits | 10 credits |
+| --- | --- | --- | --- |
+| `seller-simple-agent` | basic web search | content summarization | full market research |
+| `creative-gen-agent` | ad copy bundle | brand strategy brief | landing page HTML |
+| `crypto-market-agent` | price check | market trend analysis | DeFi protocol report |
+| `web-scraper-agent` | single URL scrape | batch scrape | deep site extraction |
 
-## Resources
+## Protocols and Deployment Modes
 
-- [Nevermined Documentation](https://nevermined.ai/docs)
-- [Nevermined App](https://nevermined.app)
-- [Payments Python SDK](https://github.com/nevermined-io/payments-py)
-- [Payments TypeScript SDK](https://github.com/nevermined-io/payments)
-- [x402 Protocol Spec](https://github.com/coinbase/x402)
-- [AWS AgentCore Samples](https://github.com/awslabs/amazon-bedrock-agentcore-samples)
-- [Discord Community](https://discord.com/invite/GZju2qScKq)
+- `x402`: payment negotiation over HTTP with `payment-signature` / `payment-required`
+- `A2A`: agent card discovery and JSON-RPC agent-to-agent calls
+- `AgentCore`: AWS runtime path used by the buyer and selected sellers
+- `App Runner`: source-based deployment path for the buyer web app
+- `MCP`: separate monetized tool server example in `agents/mcp-server-agent`
+
+## Docs
+
+- [Getting Started](./docs/getting-started.md)
+- [AWS Integration](./docs/aws-integration.md)
+- [Deploy to AgentCore](./docs/deploy-to-agentcore.md)
 
 ## License
 
