@@ -22,6 +22,7 @@ def select_seller_impl(
     query_category: str,
     seller_registry: SellerRegistry,
     ledger: PurchaseLedger,
+    failed_sellers: set[str] | None = None,
 ) -> dict:
     """Select the best seller for a query using explore/exploit logic.
 
@@ -30,15 +31,30 @@ def select_seller_impl(
         query_category: Classified category (e.g. "research", "sentiment").
         seller_registry: Registry of available sellers.
         ledger: Purchase ledger with history.
+        failed_sellers: Set of seller URLs that failed during this session.
 
     Returns:
         Dict with selected seller info and reasoning.
     """
     all_sellers = seller_registry.list_all()
+
+    # Filter out sellers that failed during this session
+    if failed_sellers:
+        pre_filter = len(all_sellers)
+        all_sellers = [s for s in all_sellers if s["url"] not in failed_sellers]
+        if pre_filter != len(all_sellers):
+            log(_logger, "SELECT", "FILTER",
+                f"Skipped {pre_filter - len(all_sellers)} previously failed seller(s)")
+
     if not all_sellers:
+        failed_count = len(failed_sellers) if failed_sellers else 0
+        msg = "No sellers available."
+        if failed_count:
+            msg += f" ({failed_count} seller(s) were skipped due to previous failures.)"
+        msg += " Use discover_marketplace first."
         return {
             "status": "error",
-            "content": [{"text": "No sellers available. Use discover_marketplace first."}],
+            "content": [{"text": msg}],
         }
 
     # Get which sellers we've tried for this category

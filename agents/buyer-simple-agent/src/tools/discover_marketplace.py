@@ -1,14 +1,55 @@
 """Discover sellers from the Nevermined hackathon marketplace Discovery API.
 
 Queries the public Discovery API, filters out unreachable endpoints,
-and auto-registers live sellers into the local SellerRegistry.
+pings all endpoints in parallel to verify liveness, and auto-registers
+live sellers into the local SellerRegistry.
 """
+
+import asyncio
 
 import httpx
 
 from ..log import get_logger, log
 
 _logger = get_logger("buyer.marketplace")
+
+# Short timeout for liveness pings — we just need to know the server responds
+_PING_TIMEOUT = 5.0
+
+
+async def _ping_one(url: str) -> tuple[str, bool]:
+    """Ping a single endpoint URL. Returns (url, is_alive)."""
+    try:
+        async with httpx.AsyncClient(timeout=_PING_TIMEOUT, verify=False) as client:
+            resp = await client.get(url)
+            # Any response (200, 401, 405, 422) means the server is alive.
+            # Only connection errors / timeouts mean it's dead.
+            return (url, True)
+    except Exception:
+        return (url, False)
+
+
+async def _ping_all(urls: list[str]) -> dict[str, bool]:
+    """Ping all URLs concurrently. Returns {url: is_alive}."""
+    tasks = [_ping_one(url) for url in urls]
+    results = await asyncio.gather(*tasks)
+    return dict(results)
+
+
+def _run_liveness_check(urls: list[str]) -> dict[str, bool]:
+    """Run parallel liveness pings (sync wrapper)."""
+    if not urls:
+        return {}
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If we're already in an async context, use a thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(lambda: asyncio.run(_ping_all(urls))).result()
+        return loop.run_until_complete(_ping_all(urls))
+    except RuntimeError:
+        return asyncio.run(_ping_all(urls))
 
 
 def discover_marketplace_impl(
@@ -73,15 +114,36 @@ def discover_marketplace_impl(
                 "cost": info.cost_description,
                 "keywords": info.keywords[:5],
             })
-            log(_logger, "MARKETPLACE", "REGISTERED",
-                f"{info.name} ({info.category}) @ {info.url}")
         else:
             skipped += 1
 
-    log(_logger, "MARKETPLACE", "COMPLETED",
-        f"registered={len(registered)} skipped={skipped} (localhost/unreachable)")
+    # Parallel liveness check — ping all registered endpoints concurrently
+    if registered:
+        urls = [s["url"] for s in registered]
+        log(_logger, "MARKETPLACE", "PING",
+            f"checking {len(urls)} endpoints in parallel (timeout={_PING_TIMEOUT}s)...")
+        liveness = _run_liveness_check(urls)
 
-    lines = [f"Marketplace discovery complete: {len(registered)} live sellers found ({skipped} skipped as unreachable).\n"]
+        alive = []
+        dead = 0
+        for s in registered:
+            if liveness.get(s["url"], False):
+                alive.append(s)
+                log(_logger, "MARKETPLACE", "ALIVE", f"{s['name']} @ {s['url']}")
+            else:
+                dead += 1
+                log(_logger, "MARKETPLACE", "DEAD", f"{s['name']} @ {s['url']}")
+                # Remove dead sellers from the registry
+                seller_registry.remove(s["url"])
+
+        registered = alive
+        log(_logger, "MARKETPLACE", "COMPLETED",
+            f"alive={len(registered)} dead={dead} skipped={skipped}")
+    else:
+        log(_logger, "MARKETPLACE", "COMPLETED",
+            f"registered=0 skipped={skipped}")
+
+    lines = [f"Marketplace discovery complete: {len(registered)} live sellers found ({skipped} skipped as localhost).\n"]
     for s in registered:
         lines.append(f"  {s['name']} [{s['category']}] - {s['cost']}")
         lines.append(f"    Team: {s['team']}")

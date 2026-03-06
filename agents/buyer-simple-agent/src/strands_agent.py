@@ -35,7 +35,7 @@ from .tools.evaluate import evaluate_purchase_impl
 from .tools.filter_sellers import filter_sellers_impl
 from .tools.orchestrate import run_workflow_impl
 from .tools.purchase import purchase_data_impl
-from .tools.purchase_a2a import purchase_a2a_impl
+from .tools.purchase_a2a import purchase_a2a_impl, purchase_http_impl
 from .tools.select_seller import select_seller_impl
 
 load_dotenv()
@@ -64,6 +64,9 @@ _logger = get_logger("buyer.tools")
 
 # Shared seller registry — used by tools and registration server
 seller_registry = SellerRegistry()
+
+# Track sellers that failed during purchase (so select_seller can skip them)
+_failed_sellers: set[str] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -257,25 +260,38 @@ def purchase_a2a(query: str, agent_url: str = "") -> dict:
 
     # Check registry for cached payment info (skip discovery round-trip)
     cached = seller_registry.get_payment_info(url)
-    if cached:
+    if cached and cached["planId"]:
         log(_logger, "TOOLS", "PURCHASE",
             f'using cached payment info plan={cached["planId"][:12]}')
-        plan_id = cached["planId"] or NVM_PLAN_ID
-        agent_id = cached["agentId"] or NVM_AGENT_ID or ""
+        plan_id = cached["planId"]
+        # Only fall back to NVM_AGENT_ID when using our own NVM_PLAN_ID.
+        # Using NVM_AGENT_ID with another seller's plan causes
+        # "plan is not associated to the agent" errors.
+        if plan_id == NVM_PLAN_ID:
+            agent_id = cached["agentId"] or NVM_AGENT_ID or ""
+        else:
+            agent_id = cached["agentId"] or ""
         min_credits = cached["credits"]
     else:
-        # Fall back to full discovery
+        # Fall back to full discovery via A2A agent card
         discovery = discover_agent_impl(url)
         if discovery.get("status") != "success":
-            return {
-                "status": "error",
-                "content": [{"text": f"Cannot discover agent at {url}. Is it running?"}],
-                "credits_used": 0,
-            }
-        payment = discovery.get("payment", {})
-        plan_id = payment.get("planId", NVM_PLAN_ID)
-        agent_id = payment.get("agentId", NVM_AGENT_ID or "")
-        min_credits = payment.get("credits", 1)
+            # If A2A discovery fails, use NVM_PLAN_ID as last resort
+            log(_logger, "TOOLS", "PURCHASE",
+                f"A2A discovery failed, falling back to NVM_PLAN_ID")
+            plan_id = NVM_PLAN_ID
+            agent_id = NVM_AGENT_ID or ""
+            min_credits = 1
+        else:
+            payment = discovery.get("payment", {})
+            plan_id = payment.get("planId", NVM_PLAN_ID)
+            # Same logic: only use NVM_AGENT_ID for our own plan
+            discovered_plan = payment.get("planId", "")
+            if discovered_plan and discovered_plan != NVM_PLAN_ID:
+                agent_id = payment.get("agentId", "")
+            else:
+                agent_id = payment.get("agentId", NVM_AGENT_ID or "")
+            min_credits = payment.get("credits", 1)
 
     if not plan_id:
         return {
@@ -283,6 +299,18 @@ def purchase_a2a(query: str, agent_url: str = "") -> dict:
             "content": [{"text": "No plan ID found in agent card or environment."}],
             "credits_used": 0,
         }
+
+    # Auto-subscribe: check if we're subscribed, order plan if not
+    try:
+        balance_result = payments.plans.get_plan_balance(plan_id)
+        if not balance_result.is_subscriber:
+            log(_logger, "TOOLS", "PURCHASE",
+                f"Not subscribed to plan {plan_id[:12]}... auto-ordering")
+            payments.plans.order_plan(plan_id)
+            log(_logger, "TOOLS", "PURCHASE", "Plan ordered successfully")
+    except Exception as e:
+        log(_logger, "TOOLS", "PURCHASE",
+            f"Balance/order check failed (continuing anyway): {e}")
 
     # Budget pre-check
     allowed, reason = budget.can_spend(min_credits)
@@ -293,6 +321,7 @@ def purchase_a2a(query: str, agent_url: str = "") -> dict:
             "credits_used": 0,
         }
 
+    # Try A2A first, fall back to direct HTTP if A2A fails (400/404)
     result = purchase_a2a_impl(
         payments=payments,
         plan_id=plan_id,
@@ -301,11 +330,30 @@ def purchase_a2a(query: str, agent_url: str = "") -> dict:
         query=query,
     )
 
+    # If A2A fails with 400/404 (not a2a endpoint), try direct HTTP
+    if result.get("status") == "error":
+        error_text = result.get("content", [{}])[0].get("text", "") if result.get("content") else ""
+        if "400" in error_text or "404" in error_text or "405" in error_text:
+            log(_logger, "TOOLS", "PURCHASE",
+                "A2A failed, falling back to direct HTTP with x402")
+            result = purchase_http_impl(
+                payments=payments,
+                plan_id=plan_id,
+                agent_url=url,
+                agent_id=agent_id,
+                query=query,
+            )
+
     credits_used = result.get("credits_used", 0)
     log(_logger, "TOOLS", "PURCHASE",
         f'status={result.get("status")} credits={credits_used}')
     if result.get("status") == "success" and credits_used > 0:
         budget.record_purchase(credits_used, url, query)
+    elif result.get("status") == "error":
+        # Track failed sellers so select_seller can skip them
+        _failed_sellers.add(url)
+        log(_logger, "TOOLS", "PURCHASE",
+            f"Marked seller as failed: {url} (total failed: {len(_failed_sellers)})")
 
     return result
 
@@ -352,7 +400,7 @@ def select_seller(query: str, query_category: str) -> dict:
         query: The user's query.
         query_category: Category of the query (e.g. "research", "sentiment", "analysis", "company", "social").
     """
-    return select_seller_impl(query, query_category, seller_registry, ledger)
+    return select_seller_impl(query, query_category, seller_registry, ledger, _failed_sellers)
 
 
 @tool
@@ -514,8 +562,9 @@ Your workflow for each user request:
 3. **filter_sellers** — Find sellers relevant to the user's query (FREE, no credits).
 4. **select_seller** — Use explore/exploit logic to pick the best seller.
    - Provide a query_category: one of "research", "sentiment", "analysis", "company", "social", "defi", "data", or a fitting category.
+   - CRITICAL: You MUST use the seller URL returned by select_seller for the purchase. Do NOT override this with a different seller. The explore/exploit logic needs you to follow its recommendations to learn which sellers are best.
 5. **check_balance** — Verify budget before purchasing.
-6. **purchase_a2a** — Buy from the selected seller.
+6. **purchase_a2a** — Buy from the EXACT seller URL returned by select_seller. Pass that URL as agent_url.
 7. **evaluate_purchase** — Score the response using the rubric below.
 
 EVALUATION RUBRIC (score each 0-2, call evaluate_purchase with these scores):
@@ -524,11 +573,13 @@ EVALUATION RUBRIC (score each 0-2, call evaluate_purchase with these scores):
 - actionability: Could the user make a decision from this? (0=no, 1=maybe, 2=yes)
 - specificity: Was it beyond generic/boilerplate? (0=generic, 1=somewhat, 2=specific)
 
-DECISION LOGIC (select_seller handles this, but understand the strategy):
+DECISION LOGIC (select_seller handles this — you MUST follow its output):
 - First time in a category → EXPLORE cheapest relevant seller
 - Only 1 seller tried → EXPLORE a different seller for comparison
 - 2+ sellers tried → EXPLOIT highest ROI seller (occasionally re-explore)
-- Always log your reasoning for choosing a seller.
+- Always use the URL from select_seller output. NEVER override with a different seller.
+- Even if the user names a specific seller, use select_seller first and follow its pick.
+  The whole point is to compare sellers, not always use the same one.
 
 For complex queries needing multiple sources:
 - **run_research_workflow** — Use Mindra to orchestrate multi-seller research.

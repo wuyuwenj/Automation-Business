@@ -103,7 +103,13 @@ class SellerRegistry:
             return None
 
         url = endpoint.rstrip("/")
+
+        # Extract plan IDs from both old format (planIds) and new format (planPricing)
         plan_ids = seller_data.get("planIds", [])
+        if not plan_ids:
+            plan_pricing = seller_data.get("planPricing", [])
+            plan_ids = [p.get("planDid", "") for p in plan_pricing if p.get("planDid")]
+
         pricing = seller_data.get("pricing", {})
 
         info = SellerInfo(
@@ -124,6 +130,19 @@ class SellerRegistry:
             self._sellers[url] = info
 
         return info
+
+    def remove(self, agent_url: str) -> bool:
+        """Remove a seller from the registry.
+
+        Args:
+            agent_url: The seller's base URL.
+
+        Returns:
+            True if the seller was found and removed, False otherwise.
+        """
+        url = agent_url.rstrip("/")
+        with self._lock:
+            return self._sellers.pop(url, None) is not None
 
     def get_payment_info(self, agent_url: str) -> dict | None:
         """Get cached payment info for a seller (skips re-discovery).

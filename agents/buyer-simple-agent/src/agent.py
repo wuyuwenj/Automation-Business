@@ -27,6 +27,7 @@ from .registration_server import start_registration_server
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 BUYER_PORT = int(os.getenv("BUYER_PORT", "8000"))
+DEFAULT_MODE = os.getenv("BUYER_AGENT_MODE", "a2a")
 
 if not OPENAI_API_KEY:
     print("OPENAI_API_KEY is required. Set it in .env file.")
@@ -37,9 +38,9 @@ def _parse_args():
     parser = argparse.ArgumentParser(description="Data Buying Agent — Interactive CLI")
     parser.add_argument(
         "--mode",
-        choices=["a2a", "http"],
-        default="a2a",
-        help="Agent mode: 'a2a' for A2A marketplace (default), 'http' for direct x402",
+        choices=["a2a", "http", "smart"],
+        default=DEFAULT_MODE,
+        help=f"Agent mode: 'smart' for marketplace discovery, 'a2a' for A2A, 'http' for direct x402 (default: {DEFAULT_MODE})",
     )
     parser.add_argument(
         "--port",
@@ -63,7 +64,7 @@ def main():
     agent = create_agent(model, mode=mode)
 
     # Start registration server in A2A mode
-    if mode == "a2a":
+    if mode in ("a2a", "smart"):
         start_registration_server(seller_registry, port=port)
 
     print("=" * 60)
@@ -71,14 +72,18 @@ def main():
     print("=" * 60)
     print(f"Mode: {mode}")
     print(f"Plan ID: {NVM_PLAN_ID}")
-    if mode == "a2a":
+    if mode in ("a2a", "smart"):
         print(f"Registration: http://localhost:{port} (sellers register here)")
         print(f"Debug:        http://localhost:{port}/sellers")
     else:
         print(f"Seller: {SELLER_URL}")
     print("\nType your queries (or 'quit' to exit):")
     print("Examples:")
-    if mode == "a2a":
+    if mode == "smart":
+        print('  "Discover the marketplace"')
+        print('  "What sellers are available?"')
+        print('  "Buy an AI resilience score for Salesforce"')
+    elif mode == "a2a":
         print('  "What sellers are available?"')
     print('  "How many credits do I have?"')
     print('  "Search for the latest AI agent trends"')
