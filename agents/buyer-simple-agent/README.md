@@ -7,26 +7,30 @@ This is the buyer counterpart to the [seller-simple-agent](../seller-simple-agen
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│            Strands Agent Core               │
-│                                             │
-│  ┌──────────────────┐  ┌─────────────────┐  │
-│  │ discover_pricing │  │ check_balance   │  │
-│  │  (GET /pricing)  │  │ (NVM API +      │  │
-│  │                  │  │  local budget)  │  │
-│  └──────────────────┘  └─────────────────┘  │
-│           ┌─────────────────┐               │
-│           │ purchase_data   │               │
-│           │ (x402 token +   │               │
-│           │  POST /data)    │               │
-│           └─────────────────┘               │
-└──────────────┬──────────────┬───────────────┘
-               │              │
-    ┌──────────▼──┐   ┌──────▼──────────┐
-    │  CLI Agent  │   │  AgentCore      │
-    │  + OpenAI   │   │  + Bedrock      │
-    │  (local)    │   │  (AWS)          │
-    └─────────────┘   └─────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                      Strands Agent Core                          │
+│                                                                  │
+│  Discovery            Selection             Purchase             │
+│  ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐  │
+│  │discover_marketplace│ │ filter_sellers  │ │ purchase_a2a     │  │
+│  │discover_pricing   │ │ select_seller   │ │ purchase_data    │  │
+│  │discover_agent     │ │ (explore/exploit│ │ (auto-retry +    │  │
+│  │list_sellers       │ │  ROI logic)     │ │  fallback)       │  │
+│  └──────────────────┘ └──────────────────┘ └──────────────────┘  │
+│                                                                  │
+│  Evaluation           Budget              Orchestration          │
+│  ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐  │
+│  │evaluate_purchase  │ │ check_balance   │ │ run_research_    │  │
+│  │get_purchase_      │ │ (NVM API +      │ │ workflow         │  │
+│  │  history          │ │  daily limits)  │ │ (Mindra)         │  │
+│  └──────────────────┘ └──────────────────┘ └──────────────────┘  │
+└───────────┬──────────────────┬──────────────────┬────────────────┘
+            │                  │                  │
+ ┌──────────▼──┐    ┌─────────▼───────┐  ┌──────▼──────────┐
+ │  CLI Agent  │    │  Web Server     │  │  AgentCore      │
+ │  + OpenAI   │    │  + React UI     │  │  + Bedrock      │
+ │  (local)    │    │  (local)        │  │  (AWS)          │
+ └─────────────┘    └─────────────────┘  └─────────────────┘
 ```
 
 ## Quick Start
@@ -95,11 +99,48 @@ Buyer Agent                    Nevermined                    Seller Agent
 
 | Tool | Description | Credits |
 |------|-------------|---------|
+| `list_sellers` | List all registered sellers with skills and pricing | Free |
 | `discover_agent` | Fetch /.well-known/agent.json — agent card + payment info | Free |
 | `check_balance` | Check NVM credit balance + local budget status | Free |
 | `purchase_a2a` | Send A2A message with auto-payment via PaymentsClient | Varies by tool |
 
+### Smart Mode (Marketplace + ROI)
+
+| Tool | Description | Credits |
+|------|-------------|---------|
+| `discover_marketplace` | Query Nevermined Discovery API, ping endpoints, register live sellers | Free |
+| `filter_sellers` | Rank sellers by keyword/category/skill relevance for a query | Free |
+| `select_seller` | Pick best seller using explore/exploit ROI logic | Free |
+| `purchase_a2a` | Buy data via A2A protocol with auto-retry on failure | Varies by tool |
+| `evaluate_purchase` | Score response on 4-point rubric (relevance, depth, actionability, specificity) | Free |
+| `get_purchase_history` | Retrieve per-seller and per-category ROI stats | Free |
+| `run_research_workflow` | Trigger multi-seller Mindra orchestration for complex queries | Varies |
+
+### AgentCore Mode (AWS)
+
+| Tool | Description | Credits |
+|------|-------------|---------|
+| `discover_marketplace` | Query Nevermined Discovery API for available sellers | Free |
+| `filter_sellers` | Rank sellers by relevance to query | Free |
+| `list_sellers` | List registered sellers | Free |
+| `check_balance` | Check NVM credit balance + local budget status | Free |
+| `purchase_a2a` | Buy data via A2A with SigV4 signing | Varies by tool |
+
 **Key difference from seller:** Buyer tools are plain `@tool` — NOT `@requires_payment`. The buyer *generates* payment tokens; it doesn't receive them.
+
+### Smart Features
+
+**Explore/Exploit Seller Selection** — The `select_seller` tool balances trying new sellers (explore) vs. reusing the best-performing one (exploit):
+- No history for a category → tries the cheapest seller first
+- Only 1 seller tried → tries another to enable comparison
+- 2+ sellers tried → picks the highest ROI seller
+- 20% random re-evaluation chance to keep exploring
+
+**Auto-Retry on Failure** — If `purchase_a2a` fails, the agent automatically picks an alternate seller and retries once.
+
+**Quality Evaluation** — After each purchase, `evaluate_purchase` scores the response (0–8 total) across 4 dimensions. ROI = quality score / credits spent.
+
+**Purchase Ledger** — All purchases are persisted to `purchase_ledger.json` with query, seller, credits, evaluation scores, and timestamps.
 
 ## Deployment Modes
 
@@ -112,7 +153,15 @@ poetry run python -m src.agent --mode http  # HTTP/x402 mode
 
 Uses OpenAI for the LLM. The agent runs a read-eval-print loop where you type queries and it orchestrates the buyer tools.
 
-### 2. Web Server + React Frontend
+### 2. Smart Mode (marketplace + ROI tracking)
+
+```bash
+poetry run python -m src.agent --mode smart
+```
+
+Uses the Nevermined marketplace to discover sellers dynamically. The agent evaluates seller quality after each purchase and tracks ROI over time. Best for testing multi-seller scenarios without manually starting sellers.
+
+### 3. Web Server + React Frontend
 
 ```bash
 poetry run python -m src.web                # Starts on http://localhost:8000
@@ -123,7 +172,7 @@ cd frontend && npm install && npm run dev   # Opens http://localhost:5173
 
 The web server exposes JSON APIs (`/api/chat`, `/api/sellers`, `/api/balance`, `/api/logs/stream`) and the React frontend provides a chat UI with a seller sidebar and activity log.
 
-### 3. Scripted Demo (no LLM)
+### 4. Scripted Demo (no LLM)
 
 ```bash
 poetry run client
@@ -131,7 +180,7 @@ poetry run client
 
 Step-by-step x402 buyer flow calling tools directly — no LLM needed. Good for testing the payment flow.
 
-### 4. Strands Demo (LLM-orchestrated)
+### 5. Strands Demo (LLM-orchestrated)
 
 ```bash
 poetry run demo
@@ -139,7 +188,7 @@ poetry run demo
 
 Pre-scripted prompts that exercise all buyer tools with LLM orchestration.
 
-### 5. A2A Client Demo
+### 6. A2A Client Demo
 
 ```bash
 poetry run client-a2a
@@ -147,7 +196,7 @@ poetry run client-a2a
 
 Step-by-step A2A buyer flow: fetch agent card, parse payment, send A2A message, get response. Requires the seller running in A2A mode (`poetry run agent-a2a`).
 
-### 6. AWS AgentCore
+### 7. AWS AgentCore
 
 Deploy the buyer to AgentCore for production use with SigV4-signed requests and Bedrock LLM inference.
 
@@ -182,6 +231,38 @@ agentcore deploy  # Build, push, and deploy
 
 See [Deploy to AgentCore](../../docs/deploy-to-agentcore.md) for the full walkthrough.
 
+## Example Queries to Test
+
+### Discovery (free, no credits spent)
+
+| Query | What it tests |
+|-------|---------------|
+| `What sellers are available?` | Seller registry / list_sellers |
+| `Discover the marketplace` | Nevermined Discovery API + endpoint pinging (Smart mode) |
+| `Check my balance` | NVM API balance + budget status |
+| `Show my purchase history` | Ledger retrieval + ROI stats |
+| `Which seller performed best for research queries?` | Per-category ROI analysis |
+
+### Purchasing (spends credits)
+
+| Query | What it tests |
+|-------|---------------|
+| `Search for the latest AI agent trends` | Basic 1-credit search purchase |
+| `Buy an AI resilience score for Salesforce` | Targeted data purchase |
+| `Get sentiment analysis on Tesla stock` | Financial data query |
+| `Conduct deep research on autonomous agent economies` | Higher-cost deep research (up to 10 credits) |
+| `Discover the marketplace and find a seller for blockchain analysis` | Full discover + filter + select + buy flow (Smart mode) |
+
+### Edge Cases
+
+| Query | What it tests |
+|-------|---------------|
+| Ask the **same category twice** | Explore/exploit logic (first explores, second exploits best seller) |
+| Ask something **no seller covers** | Fallback behavior |
+| Make **many purchases in a row** | Budget limits (MAX_DAILY_SPEND / MAX_PER_REQUEST) |
+| Point at a **dead seller URL** | Auto-retry with alternate seller |
+| `How much have I spent today?` | Daily budget tracking |
+
 ## Configuration
 
 ### Environment Variables
@@ -198,6 +279,8 @@ See [Deploy to AgentCore](../../docs/deploy-to-agentcore.md) for the full walkth
 | `MODEL_ID` | No | OpenAI model (default: `gpt-4o-mini`) |
 | `MAX_DAILY_SPEND` | No | Daily credit limit (0 = unlimited) |
 | `MAX_PER_REQUEST` | No | Per-request credit limit (0 = unlimited) |
+| `MINDRA_API_KEY` | No | Mindra API key for multi-seller workflow orchestration |
+| `MINDRA_WORKFLOW_SLUG` | No | Workflow slug (default: `basic-search-agent`) |
 
 ### Subscribing to a Seller's Plan
 
@@ -356,12 +439,12 @@ The web server exposes these endpoints for programmatic access:
 
 ## Customization Ideas
 
-1. **Multi-provider comparison** — Query multiple sellers, compare results and prices
-2. **Auto-subscribe** — Call `payments.plans.order_plan()` if not yet subscribed
-3. **Quality scoring** — Track data quality per seller over time
-4. **Caching** — Cache results to avoid duplicate purchases
-5. **A2A protocol** — Already supported! Use `discover_agent` + `purchase_a2a` tools
-6. **Persistent budget** — Store budget in file/database instead of in-memory
+1. **Result caching** — Cache responses to avoid duplicate purchases for the same query
+2. **Custom evaluation rubrics** — Extend `evaluate_purchase` with domain-specific scoring dimensions
+3. **Seller reputation system** — Weight ROI history with recency bias so seller quality trends are captured
+4. **Multi-query orchestration** — Chain purchases across sellers to synthesize composite answers
+5. **Webhook notifications** — Notify external systems on purchase events or budget thresholds
+6. **Persistent budget** — Store budget in a database instead of in-memory for cross-session limits
 
 ## Troubleshooting
 

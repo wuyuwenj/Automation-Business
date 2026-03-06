@@ -86,18 +86,13 @@ def filter_sellers_impl(
         f"query='{query[:50]}' top_match={top[0]['name'] if top else 'none'} "
         f"score={top[0]['relevance_score'] if top else 0}")
 
-    lines = [f"Seller relevance ranking for: \"{query[:80]}\"", ""]
+    lines = [f"Top matches for \"{query[:60]}\":"]
     for i, s in enumerate(top):
-        reasons_str = "; ".join(s["match_reasons"]) if s["match_reasons"] else "no strong match"
-        lines.append(
-            f"  {i+1}. {s['name']} (score: {s['relevance_score']})"
-        )
-        lines.append(f"     {s.get('cost_description', '?')} — {reasons_str}")
-        lines.append(f"     {s['description'][:100]}")
-        lines.append("")
+        reasons_str = "; ".join(s["match_reasons"]) if s["match_reasons"] else "no match"
+        lines.append(f"  {i+1}. {s['name']} score={s['relevance_score']} {s.get('cost_description', '?')} ({reasons_str})")
 
     if not any(s["relevance_score"] > 0 for s in top):
-        lines.append("  No strong matches found. Consider broadening your query.")
+        lines.append("  No strong matches. Broaden query.")
 
     return {
         "status": "success",

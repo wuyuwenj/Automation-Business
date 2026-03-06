@@ -30,9 +30,8 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 from starlette.responses import FileResponse
 
-from strands.models.openai import OpenAIModel
-
 from .log import enable_web_logging, get_logger, log
+from .openai_compat import create_openai_model, validate_openai_config
 from .registration_server import RegistrationExecutor, _build_buyer_agent_card
 from .strands_agent import (
     NVM_PLAN_ID,
@@ -44,18 +43,15 @@ from .strands_agent import (
 )
 from .tools.balance import check_balance_impl
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 BUYER_PORT = int(os.getenv("BUYER_PORT", "8000"))
 
-if not OPENAI_API_KEY:
-    print("OPENAI_API_KEY is required. Set it in .env file.")
+config_error = validate_openai_config()
+if config_error:
+    print(config_error)
     sys.exit(1)
 
 # Create agent with no console callback handler for web mode
-model = OpenAIModel(
-    client_args={"api_key": OPENAI_API_KEY},
-    model_id=os.getenv("MODEL_ID", "gpt-4o-mini"),
-)
+model = create_openai_model()
 agent = create_agent(model, mode=os.getenv("BUYER_AGENT_MODE", "smart"))
 
 # Serialize concurrent chat requests (Strands Agent is not thread-safe)
@@ -135,6 +131,7 @@ async def chat(request: Request):
         full_response = ""
         try:
             async with agent_lock:
+                agent.messages.clear()
                 async for event in agent.stream_async(message):
                     if "data" in event:
                         chunk = event["data"]

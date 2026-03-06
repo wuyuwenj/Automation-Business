@@ -191,18 +191,15 @@ def discover_marketplace_impl(
         log(_logger, "MARKETPLACE", "COMPLETED",
             f"registered=0 skipped={skipped}")
 
-    lines = [f"Marketplace discovery complete: {len(registered)} live sellers found ({skipped} skipped as localhost).\n"]
+    # Compact summary to avoid blowing up the model's context window.
+    # Full details are in the registry — the agent can use filter_sellers / list_sellers.
+    lines = [f"Marketplace: {len(registered)} live sellers ({skipped} skipped)."]
     for s in registered:
-        lines.append(f"  {s['name']} [{s['category']}] - {s['cost']}")
-        lines.append(f"    Team: {s['team']}")
-        lines.append(f"    URL: {s['url']}")
-        lines.append(f"    Keywords: {', '.join(s['keywords'])}")
-        lines.append("")
+        lines.append(f"  - {s['name']} [{s['category']}]")
 
     return {
         "status": "success",
         "content": [{"text": "\n".join(lines)}],
         "registered_count": len(registered),
         "skipped_count": skipped,
-        "sellers": registered,
     }
