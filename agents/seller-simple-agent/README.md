@@ -129,18 +129,18 @@ See [Deploy to AgentCore](../../docs/deploy-to-agentcore.md) for the full walkth
 
 ### Environment Variables
 
-```bash
-# Required
-NVM_API_KEY=sandbox:your-api-key
-NVM_ENVIRONMENT=sandbox
-NVM_PLAN_ID=your-plan-id
-OPENAI_API_KEY=sk-your-key
-
-# Optional
-NVM_AGENT_ID=your-agent-id
-MODEL_ID=gpt-4o-mini
-PORT=3000
-```
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `NVM_API_KEY` | Yes | Nevermined API key |
+| `NVM_ENVIRONMENT` | Yes | `sandbox`, `staging_sandbox`, or `live` |
+| `NVM_PLAN_ID` | Yes | Your payment plan ID |
+| `NVM_AGENT_ID` | Yes* | Agent ID (*required for A2A mode) |
+| `OPENAI_API_KEY` | Yes | OpenAI API key |
+| `MODEL_ID` | No | OpenAI model (default: `gpt-4o-mini`) |
+| `PORT` | No | HTTP server port (default: `3000`) |
+| `A2A_PORT` | No | A2A server port (default: `9000`) |
+| `BUYER_URL` | No | Buyer URL for auto-registration |
+| `OBSERVABILITY_ENABLED` | No | Route LLM calls through Nevermined proxy (default: `false`) |
 
 ### Creating a Payment Plan
 
@@ -283,6 +283,18 @@ Add to your `.env`:
 ```bash
 A2A_PORT=9000  # Default: 9000
 ```
+
+### LangGraph Mode
+
+Run the seller using LangGraph for graph-based orchestration.
+
+```bash
+poetry run agent-langgraph
+```
+
+### Observability
+
+When `OBSERVABILITY_ENABLED=true`, LLM calls are routed through the Nevermined proxy for tracking and analytics. Usage stats are available via the `GET /stats` endpoint.
 
 ## Multi-Agent Demo
 

@@ -196,7 +196,25 @@ poetry run client-a2a
 
 Step-by-step A2A buyer flow: fetch agent card, parse payment, send A2A message, get response. Requires the seller running in A2A mode (`poetry run agent-a2a`).
 
-### 7. AWS AgentCore
+### 7. AWS App Runner
+
+Deploy the buyer web server to App Runner for a publicly accessible endpoint with automatic scaling.
+
+```bash
+# Deployment is source-based — push to main and App Runner auto-deploys
+git push origin main
+```
+
+**Configuration** (`apprunner.yaml`):
+- Build: installs Poetry and dependencies into an in-project virtualenv
+- Run: `.venv/bin/python3 -m src.web` on port 8080
+- Secrets loaded from AWS Secrets Manager (`hackathon/buyer-agent`)
+
+**Required AWS setup:**
+- Secrets Manager secret with `NVM_API_KEY`, `NVM_PLAN_ID`, `OPENAI_API_KEY`, etc.
+- App Runner service configured with source-based deployment from GitHub
+
+### 8. AWS AgentCore
 
 Deploy the buyer to AgentCore for production use with SigV4-signed requests and Bedrock LLM inference.
 
@@ -230,6 +248,14 @@ agentcore deploy  # Build, push, and deploy
 - `src/agentcore_payments_client.py` — SigV4 signing + dual headers + URL handling
 
 See [Deploy to AgentCore](../../docs/deploy-to-agentcore.md) for the full walkthrough.
+
+### 9. LangGraph Mode
+
+Run the buyer agent using LangGraph for graph-based orchestration.
+
+```bash
+poetry run agent-langgraph
+```
 
 ## Example Queries to Test
 
@@ -276,9 +302,12 @@ See [Deploy to AgentCore](../../docs/deploy-to-agentcore.md) for the full walkth
 | `SELLER_URL` | No | Seller HTTP endpoint (default: `http://localhost:3000`) |
 | `SELLER_A2A_URL` | No | Seller A2A endpoint (default: `http://localhost:9000`) |
 | `OPENAI_API_KEY` | Yes* | OpenAI API key (*not needed for `client`) |
-| `MODEL_ID` | No | OpenAI model (default: `gpt-4o-mini`) |
+| `MODEL_ID` | No | OpenAI model (default: `gpt-5.4`) |
 | `MAX_DAILY_SPEND` | No | Daily credit limit (0 = unlimited) |
 | `MAX_PER_REQUEST` | No | Per-request credit limit (0 = unlimited) |
+| `OPENAI_BASE_URL` | No | Custom base URL for OpenAI-compatible gateways |
+| `OPENAI_BEARER_TOKEN` | No | Bearer token for gateway auth (requires `OPENAI_BASE_URL`) |
+| `MAX_OUTPUT_TOKENS` | No | Max output tokens for the model (default: `16384`) |
 | `MINDRA_API_KEY` | No | Mindra API key for multi-seller workflow orchestration |
 | `MINDRA_WORKFLOW_SLUG` | No | Workflow slug (default: `basic-search-agent`) |
 
@@ -429,7 +458,7 @@ The web server exposes these endpoints for programmatic access:
 
 | Aspect | Seller | Buyer |
 |--------|--------|-------|
-| Entry point | FastAPI server (port 3000) or A2A (port 9000) | Interactive CLI |
+| Entry point | FastAPI server (port 3000) or A2A (port 9000) | CLI, Web Server (port 8000), or App Runner |
 | Tools | `@requires_payment` protected | Plain `@tool` |
 | NVM_API_KEY | Builder/seller key | Subscriber key |
 | NVM_PLAN_ID | "My plan I created" | "The seller's plan I subscribe to" |
