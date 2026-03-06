@@ -147,11 +147,8 @@ def discover_marketplace_impl(
         for s in registered:
             if liveness.get(s["url"], False):
                 alive.append(s)
-                log(_logger, "MARKETPLACE", "ALIVE", f"{s['name']} @ {s['url']}")
             else:
                 dead += 1
-                log(_logger, "MARKETPLACE", "DEAD", f"{s['name']} @ {s['url']}")
-                # Remove dead sellers from the registry
                 seller_registry.remove(s["url"])
 
         registered = alive
@@ -161,8 +158,6 @@ def discover_marketplace_impl(
         # and agent cards are the only source of agentId for many sellers.
         if registered:
             card_urls = [s["url"] for s in registered]
-            log(_logger, "MARKETPLACE", "CARDS",
-                f"fetching agent cards from {len(card_urls)} live endpoints...")
             cards = _run_async(_fetch_all_agent_cards(card_urls))
             cards_found = 0
             for s_url, card in cards.items():
@@ -178,12 +173,9 @@ def discover_marketplace_impl(
                             seller_registry.update_payment_info(
                                 s_url, card_plan, card_agent)
                             cards_found += 1
-                            log(_logger, "MARKETPLACE", "CARD_OK",
-                                f"{s_url} plan={card_plan[:12]}... "
-                                f"agent={card_agent[:12] + '...' if card_agent else '(none)'}")
                         break
             log(_logger, "MARKETPLACE", "CARDS",
-                f"resolved payment info from {cards_found}/{len(card_urls)} agent cards")
+                f"{cards_found}/{len(card_urls)} agent cards resolved")
 
         log(_logger, "MARKETPLACE", "COMPLETED",
             f"alive={len(registered)} dead={dead} skipped={skipped}")
@@ -191,11 +183,14 @@ def discover_marketplace_impl(
         log(_logger, "MARKETPLACE", "COMPLETED",
             f"registered=0 skipped={skipped}")
 
-    # Compact summary to avoid blowing up the model's context window.
-    # Full details are in the registry — the agent can use filter_sellers / list_sellers.
-    lines = [f"Marketplace: {len(registered)} live sellers ({skipped} skipped)."]
-    for s in registered:
-        lines.append(f"  - {s['name']} [{s['category']}]")
+    # Ultra-compact summary — full details available via filter_sellers / list_sellers.
+    lines = [f"Marketplace: {len(registered)} live sellers registered ({skipped} skipped)."]
+    if registered:
+        sample = registered[:3]
+        names = ", ".join(s["name"] for s in sample)
+        lines.append(f"  e.g. {names}")
+        if len(registered) > 3:
+            lines.append(f"  ... and {len(registered) - 3} more. Use filter_sellers to find relevant ones.")
 
     return {
         "status": "success",

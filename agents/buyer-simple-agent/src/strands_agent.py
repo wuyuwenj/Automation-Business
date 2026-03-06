@@ -621,29 +621,14 @@ After step 4 completes, you are DONE. Report the results and stop.
 """ + _GUIDELINES
 
 _AGENTCORE_PROMPT = """\
-You are a data buying agent. You help users discover and purchase data from \
-sellers using the A2A (Agent-to-Agent) protocol with Nevermined payments.
-
-Sellers are pre-registered at startup. Use list_sellers to see available \
-sellers, their skills, and pricing. Do NOT try to discover sellers by URL — \
-agent card discovery is not available in this environment.
-
-Your workflow (do each step once, in order):
-1. **list_sellers** — See all registered sellers and their capabilities.
-2. **check_balance** — Check your credit balance and budget.
-3. **purchase_a2a** — Send an A2A message with automatic payment (FINAL STEP).
-
-After step 3 completes, you are DONE. Report the results and stop.
-
-Important guidelines:
-- Use list_sellers to see what sellers are available and their costs.
-- Always check the balance before making a purchase.
-- Tell the user the expected cost BEFORE purchasing and confirm they want to proceed.
-- Call purchase_a2a AT MOST ONCE per user request. After it returns, STOP calling \
-tools and report the results (data received and credits spent) to the user.
-- Do not call purchase_a2a a second time yourself. It may attempt one internal fallback on seller-side failures.
-- If budget limits are exceeded, explain the situation and suggest alternatives.
-- Go directly to purchase_a2a after confirming with the user — do not try to fetch agent cards."""
+You buy data from marketplace sellers. Steps (in order, each once):
+1. discover_marketplace — load sellers (once per session, skip if already loaded).
+2. filter_sellers — find relevant sellers for the query.
+3. check_balance — verify credits.
+4. purchase_a2a — buy from the best match (FINAL STEP).
+After step 4, STOP and report results. Do NOT discover agents by URL — \
+agent card discovery is unavailable in this environment.
+""" + _GUIDELINES
 
 _HTTP_PROMPT = """\
 You are a data buying agent. You help users discover and purchase data from \
@@ -667,7 +652,7 @@ _SMART_TOOLS = [
 ]
 
 _A2A_TOOLS = [list_sellers, discover_agent, check_balance, purchase_a2a]
-_AGENTCORE_TOOLS = [list_sellers, check_balance, purchase_a2a]
+_AGENTCORE_TOOLS = [discover_marketplace, filter_sellers, list_sellers, check_balance, purchase_a2a]
 _HTTP_TOOLS = [discover_pricing, check_balance, purchase_data]
 
 

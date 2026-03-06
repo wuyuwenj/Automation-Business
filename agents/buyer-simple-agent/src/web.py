@@ -23,6 +23,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Load secrets from AWS Secrets Manager if available (for ECS/App Runner)
+try:
+    import boto3
+    _secret_name = os.getenv("AWS_SECRET_NAME", "hackathon/buyer-agent")
+    _region = os.getenv("AWS_REGION", "us-west-2")
+    _client = boto3.client("secretsmanager", region_name=_region)
+    _resp = _client.get_secret_value(SecretId=_secret_name)
+    for k, v in __import__("json").loads(_resp["SecretString"]).items():
+        if k not in os.environ:
+            os.environ[k] = v
+    print(f"Loaded secrets from Secrets Manager ({_secret_name})")
+except Exception:
+    pass  # Local dev — .env is sufficient
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse

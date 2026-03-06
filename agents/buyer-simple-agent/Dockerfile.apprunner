@@ -15,11 +15,9 @@ RUN poetry config virtualenvs.create false \
 # Copy application code
 COPY src/ src/
 
-# To include the frontend, build it first (cd frontend && npm run build)
-# then uncomment:
-# COPY frontend/dist/ frontend/dist/
+# Include the pre-built frontend
+COPY frontend/dist/ frontend/dist/
 
-# AgentCore sets PORT; default to 8080
 ENV PORT=8080
 
 EXPOSE ${PORT}
@@ -27,5 +25,5 @@ EXPOSE ${PORT}
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:' + __import__('os').getenv('PORT', '8080') + '/ping')" || exit 1
 
-# Run the AgentCore-aware web server
-CMD ["python", "-m", "src.web_agentcore"]
+# Run the standard web server (not AgentCore)
+CMD ["python", "-m", "src.web"]

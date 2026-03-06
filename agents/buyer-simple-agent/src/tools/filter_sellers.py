@@ -80,16 +80,15 @@ def filter_sellers_impl(
 
     # Sort by relevance score descending
     scored.sort(key=lambda s: s["relevance_score"], reverse=True)
-    top = scored[:5]  # Return top 5
+    top = scored[:3]  # Return top 3 to save context
 
     log(_logger, "FILTER", "MATCHED",
         f"query='{query[:50]}' top_match={top[0]['name'] if top else 'none'} "
         f"score={top[0]['relevance_score'] if top else 0}")
 
-    lines = [f"Top matches for \"{query[:60]}\":"]
+    lines = [f"Top {len(top)} matches for \"{query[:40]}\":"]
     for i, s in enumerate(top):
-        reasons_str = "; ".join(s["match_reasons"]) if s["match_reasons"] else "no match"
-        lines.append(f"  {i+1}. {s['name']} score={s['relevance_score']} {s.get('cost_description', '?')} ({reasons_str})")
+        lines.append(f"  {i+1}. {s['name']} score={s['relevance_score']} {s['credits']}cr ({s['url']})")
 
     if not any(s["relevance_score"] > 0 for s in top):
         lines.append("  No strong matches. Broaden query.")

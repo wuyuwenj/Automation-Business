@@ -14,11 +14,32 @@ Usage:
     PORT=8080 python -m src.web_agentcore
 """
 
+import json
 import os
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _load_secrets():
+    """Load env vars from AWS Secrets Manager (hackathon/buyer-agent)."""
+    secret_name = os.getenv("AWS_SECRET_NAME", "hackathon/buyer-agent")
+    region = os.getenv("AWS_REGION", "us-west-2")
+    try:
+        import boto3
+        client = boto3.client("secretsmanager", region_name=region)
+        resp = client.get_secret_value(SecretId=secret_name)
+        secrets = json.loads(resp["SecretString"])
+        for key, value in secrets.items():
+            if key not in os.environ:  # don't override existing env vars
+                os.environ[key] = value
+        print(f"Loaded {len(secrets)} env vars from Secrets Manager ({secret_name})")
+    except Exception as e:
+        print(f"Secrets Manager load skipped: {e}")
+
+
+_load_secrets()
 
 # Inject AgentCore-compatible PaymentsClient BEFORE importing web module
 # (which imports strands_agent → purchase_a2a at module level)
