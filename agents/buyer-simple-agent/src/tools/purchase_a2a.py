@@ -154,17 +154,21 @@ def purchase_http_impl(
             "payment-signature": access_token,
         }
 
-        # Try {"query": "..."} first (most common)
-        body = {"query": query}
+        # Try multiple body formats — sellers use different schemas
+        body_formats = [
+            {"query": query},
+            {"message": query},
+            {"company": query, "input": query, "prompt": query},
+        ]
         with httpx.Client(timeout=60.0, follow_redirects=True) as client:
-            resp = client.post(agent_url, headers=headers, json=body)
+            resp = client.post(agent_url, headers=headers, json=body_formats[0])
 
-            # If 400/422, try {"company": "..."} for AiRI-style endpoints
-            if resp.status_code in (400, 422):
+            for i, alt_body in enumerate(body_formats[1:], 1):
+                if resp.status_code not in (400, 422):
+                    break
                 log(_logger, "HTTP_CLIENT", "RETRY",
-                    "trying alternative body format")
-                body = {"company": query, "input": query, "prompt": query}
-                resp = client.post(agent_url, headers=headers, json=body)
+                    f"trying body format #{i+1}: {list(alt_body.keys())}")
+                resp = client.post(agent_url, headers=headers, json=alt_body)
 
         if resp.status_code == 402:
             return {
@@ -174,6 +178,8 @@ def purchase_http_impl(
             }
 
         if resp.status_code >= 400:
+            log(_logger, "HTTP_CLIENT", "ERROR",
+                f"HTTP {resp.status_code}: {resp.text[:200]}")
             return _error(
                 f"Seller returned HTTP {resp.status_code}: {resp.text[:300]}"
             )
