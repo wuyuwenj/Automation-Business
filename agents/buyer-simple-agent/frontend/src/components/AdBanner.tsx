@@ -40,11 +40,12 @@ export default function AdBanner() {
     fetchZeroClickOffers(query)
       .then((offers) => {
         if (cancelled) return;
-        if (offers.length === 0) {
+        const firstOffer = offers[0] ?? null;
+        if (!firstOffer) {
           setOffer(null);
           setLoadError("No offers available right now.");
         } else {
-          setOffer(offers[0]);
+          setOffer(firstOffer);
         }
       })
       .catch(() => {
