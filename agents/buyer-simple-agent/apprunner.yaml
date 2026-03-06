@@ -2,14 +2,10 @@ version: 1.0
 runtime: python311
 build:
   commands:
-    pre-build:
-      - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-      - apt-get install -y nodejs
     build:
       - pip install poetry
       - poetry config virtualenvs.create false
       - poetry install --no-interaction --no-ansi --no-root
-      - cd frontend && npm ci && npx vite build && cd ..
 run:
   command: python -m src.web
   network:
