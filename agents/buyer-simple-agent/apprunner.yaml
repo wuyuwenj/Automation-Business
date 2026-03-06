@@ -7,7 +7,7 @@ build:
       - poetry config virtualenvs.create false
       - poetry install --no-interaction --no-ansi --no-root
 run:
-  command: python -m src.web
+  command: python3 -m src.web
   network:
     port: 8080
     env: PORT
