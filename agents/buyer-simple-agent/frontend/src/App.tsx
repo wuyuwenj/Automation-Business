@@ -11,6 +11,7 @@ import {
 import ChatPanel from "./components/ChatPanel";
 import SellerSidebar from "./components/SellerSidebar";
 import ActivityLog from "./components/ActivityLog";
+import AdBanner from "./components/AdBanner";
 
 const MAX_LOGS = 200;
 
@@ -114,9 +115,12 @@ export default function App() {
     <div className="h-screen flex flex-col overflow-hidden">
       {/* Main content area */}
       <div className="flex flex-1 min-h-0">
-        {/* Seller sidebar */}
-        <div className="w-[280px] shrink-0">
-          <SellerSidebar sellers={sellers} />
+        {/* Seller sidebar + ad */}
+        <div className="w-[280px] shrink-0 flex flex-col">
+          <div className="flex-1 min-h-0">
+            <SellerSidebar sellers={sellers} />
+          </div>
+          <AdBanner />
         </div>
 
         {/* Chat panel */}

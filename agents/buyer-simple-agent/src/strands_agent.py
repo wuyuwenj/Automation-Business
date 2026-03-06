@@ -1,9 +1,16 @@
 """
-Strands agent definition with buyer tools for x402 data purchasing.
+Strands agent definition with smart buyer tools for x402 data purchasing.
 
 This is the heart of the buyer kit. Both agent.py (interactive CLI) and
 agent_agentcore.py (AWS) import from here. The tools are plain @tool —
 NOT @requires_payment — because the buyer generates tokens, not receives them.
+
+Smart buyer features:
+- Marketplace discovery via Nevermined Discovery API
+- Pre-purchase seller filtering by keyword/category
+- Explore/exploit seller selection with ROI tracking
+- Post-purchase evaluation with structured rubric
+- Mindra workflow orchestration for multi-seller queries
 
 Usage:
     from src.strands_agent import payments, create_agent, NVM_PLAN_ID, seller_registry
@@ -17,13 +24,19 @@ from strands import Agent, tool
 from payments_py import Payments, PaymentOptions
 
 from .budget import Budget
+from .ledger import PurchaseLedger
 from .log import get_logger, log
 from .registry import SellerRegistry
 from .tools.balance import check_balance_impl
 from .tools.discover import discover_pricing_impl
 from .tools.discover_a2a import discover_agent_impl
+from .tools.discover_marketplace import discover_marketplace_impl
+from .tools.evaluate import evaluate_purchase_impl
+from .tools.filter_sellers import filter_sellers_impl
+from .tools.orchestrate import run_workflow_impl
 from .tools.purchase import purchase_data_impl
 from .tools.purchase_a2a import purchase_a2a_impl
+from .tools.select_seller import select_seller_impl
 
 load_dotenv()
 
@@ -37,11 +50,15 @@ SELLER_A2A_URL = os.getenv("SELLER_A2A_URL", "")
 MAX_DAILY_SPEND = int(os.getenv("MAX_DAILY_SPEND", "0"))
 MAX_PER_REQUEST = int(os.getenv("MAX_PER_REQUEST", "0"))
 
+MINDRA_API_KEY = os.getenv("MINDRA_API_KEY", "")
+MINDRA_WORKFLOW_SLUG = os.getenv("MINDRA_WORKFLOW_SLUG", "basic-search-agent")
+
 payments = Payments.get_instance(
     PaymentOptions(nvm_api_key=NVM_API_KEY, environment=NVM_ENVIRONMENT)
 )
 
 budget = Budget(max_daily=MAX_DAILY_SPEND, max_per_request=MAX_PER_REQUEST)
+ledger = PurchaseLedger()
 
 _logger = get_logger("buyer.tools")
 
@@ -50,7 +67,7 @@ seller_registry = SellerRegistry()
 
 
 # ---------------------------------------------------------------------------
-# Buyer tools (plain @tool — no @requires_payment)
+# Original buyer tools (plain @tool — no @requires_payment)
 # ---------------------------------------------------------------------------
 
 @tool
@@ -141,7 +158,8 @@ def list_sellers() -> dict:
     """List all registered sellers, their skills, and pricing.
 
     Sellers register automatically via A2A when they start with --buyer-url.
-    You can also register sellers manually with discover_agent.
+    You can also register sellers manually with discover_agent, or load them
+    from the marketplace with discover_marketplace.
     """
     sellers = seller_registry.list_all()
     log(_logger, "TOOLS", "LIST_SELLERS", f"count={len(sellers)}")
@@ -149,8 +167,8 @@ def list_sellers() -> dict:
         return {
             "status": "success",
             "content": [{"text": "No sellers registered yet. "
-                         "Sellers will appear here when they start with --buyer-url, "
-                         "or you can discover one manually with discover_agent."}],
+                         "Use discover_marketplace to find sellers from the hackathon, "
+                         "or discover_agent to add one by URL."}],
             "sellers": [],
         }
 
@@ -158,6 +176,8 @@ def list_sellers() -> dict:
     for s in sellers:
         skills_str = ", ".join(s["skills"]) if s["skills"] else "none"
         lines.append(f"\n  {s['name']} ({s['url']})")
+        lines.append(f"    Team: {s.get('team_name', '?')}")
+        lines.append(f"    Category: {s.get('category', '?')}")
         lines.append(f"    Skills: {skills_str}")
         lines.append(f"    Min credits: {s['credits']}")
         if s["cost_description"]:
@@ -291,13 +311,187 @@ def purchase_a2a(query: str, agent_url: str = "") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Smart buyer tools
+# ---------------------------------------------------------------------------
+
+@tool
+def discover_marketplace(category: str = "") -> dict:
+    """Discover sellers from the Nevermined hackathon marketplace.
+
+    Queries the Discovery API, filters out unreachable endpoints (localhost),
+    and auto-registers live sellers into the local registry.
+
+    Args:
+        category: Optional category filter (e.g. "DeFi", "AI/ML", "Research").
+    """
+    return discover_marketplace_impl(NVM_API_KEY, seller_registry, category)
+
+
+@tool
+def filter_sellers(query: str) -> dict:
+    """Find the most relevant sellers for a query (FREE — no credits spent).
+
+    Ranks sellers by keyword overlap, category match, and description
+    relevance using metadata already in the registry.
+
+    Args:
+        query: The user's query to match against seller capabilities.
+    """
+    return filter_sellers_impl(query, seller_registry)
+
+
+@tool
+def select_seller(query: str, query_category: str) -> dict:
+    """Select the best seller using explore/exploit logic based on purchase history.
+
+    Checks the purchase ledger for this category, compares seller ROI,
+    and decides whether to use a proven seller or explore a new one.
+    Logs the decision reasoning explicitly.
+
+    Args:
+        query: The user's query.
+        query_category: Category of the query (e.g. "research", "sentiment", "analysis", "company", "social").
+    """
+    return select_seller_impl(query, query_category, seller_registry, ledger)
+
+
+@tool
+def evaluate_purchase(
+    query: str,
+    query_category: str,
+    seller_name: str,
+    seller_url: str,
+    response_text: str,
+    credits_spent: int,
+    relevance: int,
+    depth: int,
+    actionability: int,
+    specificity: int,
+    reasoning: str,
+) -> dict:
+    """Evaluate a purchase response and record ROI in the ledger.
+
+    Call this AFTER every purchase to score the response quality.
+
+    Scoring rubric (0-2 each, max 8 total):
+    - relevance: Did it directly answer the query? (0=no, 1=partially, 2=yes)
+    - depth: Did it include specific data/facts/numbers? (0=none, 1=some, 2=detailed)
+    - actionability: Could the user make a decision from this? (0=no, 1=maybe, 2=yes)
+    - specificity: Was it beyond generic/boilerplate? (0=generic, 1=somewhat, 2=specific)
+
+    Args:
+        query: The original query sent to the seller.
+        query_category: Category (e.g. "research", "sentiment", "analysis").
+        seller_name: Name of the seller.
+        seller_url: URL of the seller.
+        response_text: The full response text received.
+        credits_spent: Number of credits spent.
+        relevance: 0-2 relevance score.
+        depth: 0-2 depth score.
+        actionability: 0-2 actionability score.
+        specificity: 0-2 specificity score.
+        reasoning: Your explanation of why you gave these scores.
+    """
+    return evaluate_purchase_impl(
+        ledger=ledger,
+        query=query,
+        query_category=query_category,
+        seller_url=seller_url,
+        seller_name=seller_name,
+        response_text=response_text,
+        credits_spent=credits_spent,
+        relevance=relevance,
+        depth=depth,
+        actionability=actionability,
+        specificity=specificity,
+        reasoning=reasoning,
+    )
+
+
+@tool
+def run_research_workflow(query: str) -> dict:
+    """Run a multi-step research workflow using Mindra orchestration.
+
+    Triggers a Mindra workflow that coordinates queries across multiple
+    sources and returns synthesized results. Use this for complex queries
+    that benefit from multi-source research.
+
+    Args:
+        query: The research query to investigate.
+    """
+    return run_workflow_impl(
+        mindra_api_key=MINDRA_API_KEY,
+        workflow_slug=MINDRA_WORKFLOW_SLUG,
+        query=query,
+    )
+
+
+@tool
+def get_purchase_history() -> dict:
+    """Get the full purchase history with evaluations, ROI, and seller comparison.
+
+    Shows all past purchases, per-seller stats, per-category stats,
+    and identifies the best-performing sellers.
+    """
+    summary = ledger.get_summary()
+    log(_logger, "TOOLS", "HISTORY",
+        f"total={summary['total_purchases']} avg_roi={summary['avg_roi']}")
+
+    if summary["total_purchases"] == 0:
+        return {
+            "status": "success",
+            "content": [{"text": "No purchases recorded yet."}],
+            "summary": summary,
+        }
+
+    lines = [
+        f"Purchase History Summary:",
+        f"  Total purchases: {summary['total_purchases']}",
+        f"  Total spent: {summary['total_spent']} credits",
+        f"  Average ROI: {summary['avg_roi']:.1f}",
+        "",
+        "By Seller:",
+    ]
+    for url, stats in summary["by_seller"].items():
+        lines.append(
+            f"  {stats['name']}: {stats['purchases']} purchases, "
+            f"avg quality {stats['avg_quality']}/8, avg ROI {stats['avg_roi']:.1f}, "
+            f"total spent {stats['total_spent']} credits"
+        )
+
+    lines.append("\nBy Category:")
+    for cat, stats in summary["by_category"].items():
+        lines.append(
+            f"  {cat}: {stats['purchases']} purchases, "
+            f"{stats['sellers_tried']} sellers tried, avg ROI {stats['avg_roi']:.1f}"
+        )
+
+    lines.append("\nRecent Purchases:")
+    for r in summary["recent"]:
+        eval_data = r.get("evaluation", {})
+        lines.append(
+            f"  [{r['timestamp'][:19]}] {r['seller_name']}: "
+            f"quality={r['quality_score']}/8 roi={r['roi']:.1f} "
+            f"cost={r['cost']} — \"{r['query'][:50]}\""
+        )
+        if eval_data.get("reasoning"):
+            lines.append(f"    Reasoning: {eval_data['reasoning'][:100]}")
+
+    return {
+        "status": "success",
+        "content": [{"text": "\n".join(lines)}],
+        "summary": summary,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Agent factory
 # ---------------------------------------------------------------------------
 
 _GUIDELINES = """\
 
 Important guidelines:
-- Always discover the seller first so you can inform the user about costs.
+- Always discover sellers first (marketplace or manual) so you know what's available.
 - Check the balance before making a purchase to show the user their credit status.
 - Even if the balance shows "not subscribed", you CAN still purchase. The x402
   payment flow handles subscription automatically during the verify/settle step.
@@ -307,6 +501,47 @@ STOP calling tools and report the results (data received and credits spent) to t
 - If the purchase returns an error or empty results, report the problem — do NOT retry.
 - If budget limits are exceeded, explain the situation and suggest alternatives.
 - You can purchase from different sellers by providing their URL."""
+
+_SMART_BUYER_PROMPT = """\
+You are an autonomous data buying agent with smart purchasing logic.
+You discover sellers, evaluate their quality, track ROI, and make
+intelligent buying decisions using explore/exploit strategy.
+
+Your workflow for each user request:
+
+1. **discover_marketplace** — Load sellers from the hackathon marketplace (do this once at start).
+2. **list_sellers** — See all registered sellers and their capabilities.
+3. **filter_sellers** — Find sellers relevant to the user's query (FREE, no credits).
+4. **select_seller** — Use explore/exploit logic to pick the best seller.
+   - Provide a query_category: one of "research", "sentiment", "analysis", "company", "social", "defi", "data", or a fitting category.
+5. **check_balance** — Verify budget before purchasing.
+6. **purchase_a2a** — Buy from the selected seller.
+7. **evaluate_purchase** — Score the response using the rubric below.
+
+EVALUATION RUBRIC (score each 0-2, call evaluate_purchase with these scores):
+- relevance: Did it directly answer the query? (0=no, 1=partially, 2=yes)
+- depth: Did it include specific data/facts/numbers? (0=none, 1=some, 2=detailed)
+- actionability: Could the user make a decision from this? (0=no, 1=maybe, 2=yes)
+- specificity: Was it beyond generic/boilerplate? (0=generic, 1=somewhat, 2=specific)
+
+DECISION LOGIC (select_seller handles this, but understand the strategy):
+- First time in a category → EXPLORE cheapest relevant seller
+- Only 1 seller tried → EXPLORE a different seller for comparison
+- 2+ sellers tried → EXPLOIT highest ROI seller (occasionally re-explore)
+- Always log your reasoning for choosing a seller.
+
+For complex queries needing multiple sources:
+- **run_research_workflow** — Use Mindra to orchestrate multi-seller research.
+
+To review past performance:
+- **get_purchase_history** — See all purchases, ROI, and seller rankings.
+
+After purchasing and evaluating, present the results to the user along with:
+- The data received
+- Quality score and ROI
+- Which seller was chosen and why
+- Budget status
+""" + _GUIDELINES
 
 _A2A_PROMPT = """\
 You are a data buying agent. You help users discover and purchase data from \
@@ -361,6 +596,20 @@ Your workflow (do each step once, in order):
 After step 3 completes, you are DONE. Report the results and stop.
 """ + _GUIDELINES
 
+# Tool sets for each mode
+_SMART_TOOLS = [
+    discover_marketplace,
+    list_sellers,
+    discover_agent,
+    filter_sellers,
+    select_seller,
+    check_balance,
+    purchase_a2a,
+    evaluate_purchase,
+    get_purchase_history,
+    run_research_workflow,
+]
+
 _A2A_TOOLS = [list_sellers, discover_agent, check_balance, purchase_a2a]
 _AGENTCORE_TOOLS = [list_sellers, check_balance, purchase_a2a]
 _HTTP_TOOLS = [discover_pricing, check_balance, purchase_data]
@@ -371,14 +620,19 @@ def create_agent(model, mode: str = "a2a") -> Agent:
 
     Args:
         model: A Strands-compatible model (OpenAIModel, BedrockModel, etc.)
-        mode: Agent mode — "a2a" for A2A marketplace tools (default),
+        mode: Agent mode —
+              "smart" for smart buyer with evaluation/ROI (default for hackathon),
+              "a2a" for basic A2A marketplace tools,
               "http" for direct x402 HTTP tools,
               "agentcore" for AgentCore deployment (no discover_agent).
 
     Returns:
         Configured Strands Agent with buyer tools.
     """
-    if mode == "a2a":
+    if mode == "smart":
+        tools = _SMART_TOOLS
+        prompt = _SMART_BUYER_PROMPT
+    elif mode == "a2a":
         tools = _A2A_TOOLS
         prompt = _A2A_PROMPT
     elif mode == "agentcore":
@@ -388,7 +642,7 @@ def create_agent(model, mode: str = "a2a") -> Agent:
         tools = _HTTP_TOOLS
         prompt = _HTTP_PROMPT
     else:
-        raise ValueError(f"Invalid mode {mode!r}, must be 'a2a', 'agentcore', or 'http'")
+        raise ValueError(f"Invalid mode {mode!r}, must be 'smart', 'a2a', 'agentcore', or 'http'")
     return Agent(
         model=model,
         tools=tools,

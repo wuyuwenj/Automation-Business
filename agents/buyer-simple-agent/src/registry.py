@@ -6,11 +6,12 @@ or manual discovery. Used by the buyer agent to track available sellers.
 
 import threading
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 
 @dataclass
 class SellerInfo:
-    """Parsed seller information from an agent card."""
+    """Parsed seller information from an agent card or marketplace."""
 
     url: str
     name: str
@@ -20,6 +21,9 @@ class SellerInfo:
     agent_id: str = ""
     credits: int = 1
     cost_description: str = ""
+    keywords: list[str] = field(default_factory=list)
+    category: str = ""
+    team_name: str = ""
 
 
 class SellerRegistry:
@@ -77,6 +81,50 @@ class SellerRegistry:
 
         return info
 
+    def register_from_marketplace(self, seller_data: dict) -> SellerInfo | None:
+        """Register a seller from the Discovery API response format.
+
+        Args:
+            seller_data: A single seller dict from the Discovery API.
+
+        Returns:
+            SellerInfo if registered, None if endpoint is unreachable (localhost etc).
+        """
+        endpoint = seller_data.get("endpointUrl", "")
+        if not endpoint:
+            return None
+
+        # Filter out localhost / internal endpoints
+        parsed = urlparse(endpoint)
+        hostname = parsed.hostname or ""
+        if hostname in ("localhost", "127.0.0.1", "0.0.0.0", "") or ":" not in endpoint[:10] and not endpoint.startswith("http"):
+            return None
+        if hostname == "seller" or ".local" in hostname:
+            return None
+
+        url = endpoint.rstrip("/")
+        plan_ids = seller_data.get("planIds", [])
+        pricing = seller_data.get("pricing", {})
+
+        info = SellerInfo(
+            url=url,
+            name=seller_data.get("name", "Unknown"),
+            description=seller_data.get("description", ""),
+            skills=[{"name": kw} for kw in seller_data.get("keywords", [])[:5]],
+            plan_id=plan_ids[0] if plan_ids else "",
+            agent_id=seller_data.get("nvmAgentId", ""),
+            credits=1,
+            cost_description=pricing.get("perRequest", ""),
+            keywords=seller_data.get("keywords", []),
+            category=seller_data.get("category", ""),
+            team_name=seller_data.get("teamName", ""),
+        )
+
+        with self._lock:
+            self._sellers[url] = info
+
+        return info
+
     def get_payment_info(self, agent_url: str) -> dict | None:
         """Get cached payment info for a seller (skips re-discovery).
 
@@ -113,6 +161,9 @@ class SellerRegistry:
                 "skills": skill_names,
                 "credits": s.credits,
                 "cost_description": s.cost_description,
+                "keywords": s.keywords,
+                "category": s.category,
+                "team_name": s.team_name,
             })
         return result
 
