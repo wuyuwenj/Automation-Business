@@ -38,6 +38,7 @@ from .strands_agent import (
     NVM_PLAN_ID,
     budget,
     create_agent,
+    ledger,
     payments,
     seller_registry,
 )
@@ -55,7 +56,7 @@ model = OpenAIModel(
     client_args={"api_key": OPENAI_API_KEY},
     model_id=os.getenv("MODEL_ID", "gpt-4o-mini"),
 )
-agent = create_agent(model, mode=os.getenv("BUYER_AGENT_MODE", "a2a"))
+agent = create_agent(model, mode=os.getenv("BUYER_AGENT_MODE", "smart"))
 
 # Serialize concurrent chat requests (Strands Agent is not thread-safe)
 agent_lock = asyncio.Lock()
@@ -213,6 +214,25 @@ async def log_stream(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Ledger / ROI endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/ledger")
+async def get_ledger():
+    """Return purchase ledger summary with ROI and seller stats."""
+    return JSONResponse(content=ledger.get_summary())
+
+
+@app.get("/api/ledger/records")
+async def get_ledger_records():
+    """Return all purchase records with evaluations."""
+    from dataclasses import asdict
+    records = ledger.get_all_records()
+    return JSONResponse(content=[asdict(r) for r in records])
+
+
+# ---------------------------------------------------------------------------
 # A2A registration routes
 # ---------------------------------------------------------------------------
 
@@ -257,8 +277,10 @@ def main():
     """Run the buyer agent web server."""
     import uvicorn
 
-    log(_logger, "WEB", "STARTUP", f"port={BUYER_PORT} mode=a2a")
+    mode = os.getenv("BUYER_AGENT_MODE", "smart")
+    log(_logger, "WEB", "STARTUP", f"port={BUYER_PORT} mode={mode}")
     print(f"Buyer Agent Web Server running on http://localhost:{BUYER_PORT}")
+    print(f"Mode: {mode} (smart buyer with ROI tracking)")
     print(f"A2A registration endpoint active")
     if FRONTEND_DIR.exists():
         print(f"Serving frontend from {FRONTEND_DIR}")

@@ -1,8 +1,10 @@
-"""Purchase data from a seller via A2A protocol using PaymentsClient."""
+"""Purchase data from a seller via A2A protocol or direct HTTP with x402."""
 
 import asyncio
+import json
 from uuid import uuid4
 
+import httpx
 from a2a.types import MessageSendParams, Message, TextPart
 
 from payments_py import Payments
@@ -66,14 +68,16 @@ def purchase_a2a_impl(
     Returns:
         dict with status, content (for Strands), response text, and credits_used.
     """
+    # Normalize empty agent_id to None — the backend rejects "" but accepts None
+    effective_agent_id = agent_id if agent_id else None
     log(_logger, "A2A_CLIENT", "CONNECT",
-        f"url={agent_url} plan={plan_id[:12]} agent={agent_id[:12]}")
+        f"url={agent_url} plan={plan_id[:12]} agent={effective_agent_id or '(none)'}")
     try:
         token_options = build_token_options(payments, plan_id)
         client = _client_class(
             agent_base_url=agent_url,
             payments=payments,
-            agent_id=agent_id,
+            agent_id=effective_agent_id,
             plan_id=plan_id,
             delegation_config=token_options.delegation_config,
         )
@@ -105,6 +109,118 @@ def purchase_a2a_impl(
     except Exception as e:
         log(_logger, "A2A_CLIENT", "ERROR", f"purchase failed: {e}")
         return _error(f"A2A purchase failed: {e}")
+
+
+def purchase_http_impl(
+    payments: Payments,
+    plan_id: str,
+    agent_url: str,
+    agent_id: str,
+    query: str,
+) -> dict:
+    """Purchase via direct HTTP POST with x402 payment-signature header.
+
+    Fallback for sellers that don't support A2A protocol. Sends the query
+    directly to the seller's endpoint URL.
+
+    Args:
+        payments: Initialized Payments SDK instance.
+        plan_id: The seller's plan ID.
+        agent_url: Full endpoint URL of the seller.
+        agent_id: Seller's agent ID (optional).
+        query: The data query to send.
+
+    Returns:
+        dict with status, content, response text, and credits_used.
+    """
+    log(_logger, "HTTP_CLIENT", "CONNECT",
+        f"url={agent_url} plan={plan_id[:12]}")
+    try:
+        token_options = build_token_options(payments, plan_id)
+        token_result = payments.x402.get_x402_access_token(
+            plan_id=plan_id,
+            agent_id=agent_id or None,
+            token_options=token_options,
+        )
+        access_token = token_result.get("accessToken")
+        if not access_token:
+            return _error("Failed to generate x402 access token.")
+
+        log(_logger, "HTTP_CLIENT", "SENDING", f'query="{query[:60]}"')
+
+        # Try common request body formats
+        headers = {
+            "Content-Type": "application/json",
+            "payment-signature": access_token,
+        }
+
+        # Try multiple body formats — sellers use different schemas
+        body_formats = [
+            {"query": query},
+            {"message": query},
+            {"company": query, "input": query, "prompt": query},
+        ]
+        with httpx.Client(timeout=60.0, follow_redirects=True) as client:
+            resp = client.post(agent_url, headers=headers, json=body_formats[0])
+
+            for i, alt_body in enumerate(body_formats[1:], 1):
+                if resp.status_code not in (400, 422):
+                    break
+                log(_logger, "HTTP_CLIENT", "RETRY",
+                    f"trying body format #{i+1}: {list(alt_body.keys())}")
+                resp = client.post(agent_url, headers=headers, json=alt_body)
+
+        if resp.status_code == 402:
+            return {
+                "status": "payment_required",
+                "content": [{"text": "Payment required (402). Token may be invalid or insufficient credits."}],
+                "credits_used": 0,
+            }
+
+        if resp.status_code >= 400:
+            log(_logger, "HTTP_CLIENT", "ERROR",
+                f"HTTP {resp.status_code}: {resp.text[:200]}")
+            return _error(
+                f"Seller returned HTTP {resp.status_code}: {resp.text[:300]}"
+            )
+
+        # Parse response - handle various formats
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"response": resp.text}
+
+        # Extract response text from common response shapes
+        response_text = ""
+        if isinstance(data, dict):
+            response_text = (
+                data.get("response", "")
+                or data.get("result", "")
+                or data.get("output", "")
+                or data.get("text", "")
+                or data.get("message", "")
+                or json.dumps(data, indent=2)
+            )
+        elif isinstance(data, str):
+            response_text = data
+        else:
+            response_text = str(data)
+
+        credits_used = 0
+        if isinstance(data, dict):
+            credits_used = data.get("credits_used", 0) or data.get("creditsUsed", 0)
+
+        log(_logger, "HTTP_CLIENT", "COMPLETED",
+            f"status={resp.status_code} credits={credits_used} "
+            f"response={len(response_text)} chars")
+
+        return _success(response_text, credits_used)
+
+    except httpx.ConnectError:
+        return _error(f"Cannot connect to seller at {agent_url}.")
+    except Exception as e:
+        log(_logger, "HTTP_CLIENT", "ERROR", f"purchase failed: {e}")
+        return _error(f"HTTP purchase failed: {e}")
 
 
 async def _collect_stream(client: PaymentsClient, params: MessageSendParams) -> list:
