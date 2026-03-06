@@ -36,20 +36,38 @@ async def _ping_all(urls: list[str]) -> dict[str, bool]:
     return dict(results)
 
 
-def _run_liveness_check(urls: list[str]) -> dict[str, bool]:
-    """Run parallel liveness pings (sync wrapper)."""
-    if not urls:
-        return {}
+async def _fetch_agent_card(url: str) -> tuple[str, dict | None]:
+    """Fetch /.well-known/agent.json from a seller. Returns (url, card_or_None)."""
+    base = url.rstrip("/")
+    card_url = f"{base}/.well-known/agent.json"
+    try:
+        async with httpx.AsyncClient(timeout=_PING_TIMEOUT, verify=False) as client:
+            resp = await client.get(card_url)
+            if resp.status_code == 200 and "json" in resp.headers.get("content-type", ""):
+                return (url, resp.json())
+    except Exception:
+        pass
+    return (url, None)
+
+
+async def _fetch_all_agent_cards(urls: list[str]) -> dict[str, dict | None]:
+    """Fetch agent cards from all URLs concurrently."""
+    tasks = [_fetch_agent_card(url) for url in urls]
+    results = await asyncio.gather(*tasks)
+    return dict(results)
+
+
+def _run_async(coro):
+    """Run an async coroutine from sync code (handles existing event loops)."""
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # If we're already in an async context, use a thread
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(lambda: asyncio.run(_ping_all(urls))).result()
-        return loop.run_until_complete(_ping_all(urls))
+                return pool.submit(lambda: asyncio.run(coro)).result()
+        return loop.run_until_complete(coro)
     except RuntimeError:
-        return asyncio.run(_ping_all(urls))
+        return asyncio.run(coro)
 
 
 def discover_marketplace_impl(
@@ -122,7 +140,7 @@ def discover_marketplace_impl(
         urls = [s["url"] for s in registered]
         log(_logger, "MARKETPLACE", "PING",
             f"checking {len(urls)} endpoints in parallel (timeout={_PING_TIMEOUT}s)...")
-        liveness = _run_liveness_check(urls)
+        liveness = _run_async(_ping_all(urls))
 
         alive = []
         dead = 0
@@ -137,6 +155,36 @@ def discover_marketplace_impl(
                 seller_registry.remove(s["url"])
 
         registered = alive
+
+        # Fetch agent cards in parallel to get correct plan/agent IDs.
+        # The Discovery API plan IDs often differ from the ones in agent cards,
+        # and agent cards are the only source of agentId for many sellers.
+        if registered:
+            card_urls = [s["url"] for s in registered]
+            log(_logger, "MARKETPLACE", "CARDS",
+                f"fetching agent cards from {len(card_urls)} live endpoints...")
+            cards = _run_async(_fetch_all_agent_cards(card_urls))
+            cards_found = 0
+            for s_url, card in cards.items():
+                if not card:
+                    continue
+                extensions = card.get("capabilities", {}).get("extensions", [])
+                for ext in extensions:
+                    if ext.get("uri") == "urn:nevermined:payment":
+                        params = ext.get("params", {})
+                        card_plan = params.get("planId", "")
+                        card_agent = params.get("agentId", "")
+                        if card_plan or card_agent:
+                            seller_registry.update_payment_info(
+                                s_url, card_plan, card_agent)
+                            cards_found += 1
+                            log(_logger, "MARKETPLACE", "CARD_OK",
+                                f"{s_url} plan={card_plan[:12]}... "
+                                f"agent={card_agent[:12] + '...' if card_agent else '(none)'}")
+                        break
+            log(_logger, "MARKETPLACE", "CARDS",
+                f"resolved payment info from {cards_found}/{len(card_urls)} agent cards")
+
         log(_logger, "MARKETPLACE", "COMPLETED",
             f"alive={len(registered)} dead={dead} skipped={skipped}")
     else:

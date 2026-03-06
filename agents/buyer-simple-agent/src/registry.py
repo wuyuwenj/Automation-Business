@@ -147,6 +147,20 @@ class SellerRegistry:
 
         return info
 
+    def update_payment_info(self, agent_url: str, plan_id: str, agent_id: str) -> bool:
+        """Update a seller's plan_id and agent_id (e.g. from agent card).
+
+        Returns True if the seller was found and updated.
+        """
+        url = agent_url.rstrip("/")
+        with self._lock:
+            info = self._sellers.get(url)
+            if not info:
+                return False
+            info.plan_id = plan_id
+            info.agent_id = agent_id
+            return True
+
     def remove(self, agent_url: str) -> bool:
         """Remove a seller from the registry.
 
