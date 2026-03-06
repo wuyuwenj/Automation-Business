@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /**
  * ZeroClick ad banner component.
@@ -6,19 +6,30 @@ import { useEffect, useRef } from "react";
  * Renders a ZeroClick ad placement in the buyer frontend.
  * Revenue from ads offsets the cost of purchasing from sellers.
  *
- * Configure by setting VITE_ZEROCLICK_PLACEMENT_ID in your .env file.
- * If not set, shows a placeholder explaining the ad slot.
+ * The placement ID is loaded at runtime from the backend /api/config
+ * endpoint, which reads it from environment variables or Secrets Manager.
  */
 
-const PLACEMENT_ID = import.meta.env.VITE_ZEROCLICK_PLACEMENT_ID || "";
 const ZEROCLICK_SCRIPT = "https://sdk.zeroclick.ai/v1/zeroclick.js";
 
 export default function AdBanner() {
   const containerRef = useRef<HTMLDivElement>(null);
   const scriptLoaded = useRef(false);
+  const [placementId, setPlacementId] = useState("");
 
   useEffect(() => {
-    if (!PLACEMENT_ID || scriptLoaded.current) return;
+    fetch("/api/config")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.zeroclickPlacementId) {
+          setPlacementId(data.zeroclickPlacementId);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!placementId || scriptLoaded.current) return;
 
     // Load ZeroClick SDK script
     const existing = document.querySelector(
@@ -28,17 +39,17 @@ export default function AdBanner() {
       const script = document.createElement("script");
       script.src = ZEROCLICK_SCRIPT;
       script.async = true;
-      script.dataset.placementId = PLACEMENT_ID;
+      script.dataset.placementId = placementId;
       document.head.appendChild(script);
     }
     scriptLoaded.current = true;
-  }, []);
+  }, [placementId]);
 
-  if (!PLACEMENT_ID) {
+  if (!placementId) {
     return (
       <div className="mx-3 mb-3 rounded-lg border border-dashed border-zinc-700 bg-zinc-900/50 p-3 text-center">
         <p className="text-xs text-zinc-500">
-          Ad slot — set <code className="text-zinc-400">VITE_ZEROCLICK_PLACEMENT_ID</code> to enable ZeroClick ads
+          Ad slot — set <code className="text-zinc-400">ZEROCLICK_PLACEMENT_ID</code> in env to enable ZeroClick ads
         </p>
         <p className="mt-1 text-[10px] text-zinc-600">
           Revenue offsets credit costs
@@ -51,7 +62,7 @@ export default function AdBanner() {
     <div className="mx-3 mb-3">
       <div
         ref={containerRef}
-        data-zeroclick-placement={PLACEMENT_ID}
+        data-zeroclick-placement={placementId}
         className="min-h-[60px] rounded-lg overflow-hidden"
       />
       <p className="mt-1 text-center text-[10px] text-zinc-600">

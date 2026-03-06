@@ -192,6 +192,14 @@ async def get_balance():
     })
 
 
+@app.get("/api/config")
+async def get_config():
+    """Return non-secret frontend configuration loaded from env/Secrets Manager."""
+    return JSONResponse(content={
+        "zeroclickPlacementId": os.getenv("ZEROCLICK_PLACEMENT_ID", ""),
+    })
+
+
 @app.get("/ping")
 async def ping():
     """Health check endpoint."""
