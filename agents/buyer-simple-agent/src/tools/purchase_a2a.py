@@ -156,7 +156,7 @@ def purchase_http_impl(
 
         # Try {"query": "..."} first (most common)
         body = {"query": query}
-        with httpx.Client(timeout=60.0) as client:
+        with httpx.Client(timeout=60.0, follow_redirects=True) as client:
             resp = client.post(agent_url, headers=headers, json=body)
 
             # If 400/422, try {"company": "..."} for AiRI-style endpoints

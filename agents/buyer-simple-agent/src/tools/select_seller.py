@@ -75,21 +75,26 @@ def select_seller_impl(
     untried = [s for s in all_sellers if s["url"] not in tried_urls]
 
     # If too many failed explores this session, skip exploration and use known-good
-    should_force_exploit = failed_count >= MAX_FAILED_EXPLORES and tried
+    # Look for known-good sellers from ANY category (not just current)
+    best_global_url = ledger.get_best_seller_url()
+    has_known_good = best_global_url and any(s["url"] == best_global_url for s in all_sellers)
+    should_force_exploit = failed_count >= MAX_FAILED_EXPLORES and (tried or has_known_good)
 
     decision = ""
     selected = None
 
     if should_force_exploit:
         # Too many failures — fall back to best known-good seller
-        best_url = category_stats.get("best_seller", {}).get("url")
+        # Try category-specific best first, then global best
+        best_url = category_stats.get("best_seller", {}).get("url") or best_global_url
         selected = next(
             (s for s in all_sellers if s["url"] == best_url),
             tried[0] if tried else all_sellers[0],
         )
+        source = "this category" if best_url != best_global_url else "all categories"
         decision = (
             f"EXPLOIT (failsafe): {failed_count} seller(s) failed this session. "
-            f"Falling back to known-good seller '{selected['name']}' "
+            f"Falling back to best seller '{selected['name']}' (from {source}) "
             f"instead of continuing to explore."
         )
 

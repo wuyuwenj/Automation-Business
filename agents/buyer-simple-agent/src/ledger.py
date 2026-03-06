@@ -160,6 +160,20 @@ class PurchaseLedger:
                 if r.query_category == category.lower()
             })
 
+    def get_best_seller_url(self) -> str | None:
+        """Return the URL of the best-performing seller across all categories."""
+        with self._lock:
+            records = list(self._records)
+        if not records:
+            return None
+        by_seller: dict[str, list[PurchaseRecord]] = {}
+        for r in records:
+            by_seller.setdefault(r.seller_url, []).append(r)
+        return max(
+            by_seller,
+            key=lambda u: sum(r.roi for r in by_seller[u]) / len(by_seller[u]),
+        )
+
     def get_all_records(self) -> list[PurchaseRecord]:
         """Return all purchase records."""
         with self._lock:

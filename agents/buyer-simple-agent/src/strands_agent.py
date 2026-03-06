@@ -358,7 +358,7 @@ def purchase_a2a(query: str, agent_url: str = "") -> dict:
     # If A2A fails with 400/404 (not a2a endpoint), try direct HTTP
     if result.get("status") == "error":
         error_text = result.get("content", [{}])[0].get("text", "") if result.get("content") else ""
-        if "400" in error_text or "404" in error_text or "405" in error_text:
+        if any(code in error_text for code in ("400", "402", "404", "405", "307", "Redirect")):
             log(_logger, "TOOLS", "PURCHASE",
                 "A2A failed, falling back to direct HTTP with x402")
             result = purchase_http_impl(
