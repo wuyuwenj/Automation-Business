@@ -11,8 +11,9 @@ The repo is centered on one buyer experience and several sell-side agents:
 ## Live Demo
 
 - Buyer web frontend: https://kwckssvkpx.us-west-2.awsapprunner.com/
+- ZeroClick feature demo (dynamic sponsored offers + MCP signal collection): https://kwckssvkpx.us-west-2.awsapprunner.com/
 
-The hosted buyer UI is backed by the buyer web server in [`agents/buyer-simple-agent`](./agents/buyer-simple-agent/). It also supports ZeroClick offer placement through the server-side `/api/zeroclick/offers` integration when `ZEROCLICK_API_KEY` is configured.
+The hosted buyer UI is backed by the buyer web server in [`agents/buyer-simple-agent`](./agents/buyer-simple-agent/). It now includes submit-triggered ZeroClick ad matching, MCP-based signal collection, and server-side offer retrieval through `/api/zeroclick/offers`.
 
 ## Repo Map
 

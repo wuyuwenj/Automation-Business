@@ -68,9 +68,13 @@ if config_error:
     print(config_error)
     sys.exit(1)
 
-# Create agent with no console callback handler for web mode
+# Create a shared model, but instantiate a fresh agent per request.
+# Strands agents can enter an unrecoverable state after max_tokens errors.
 model = create_openai_model()
-agent = create_agent(model, mode=os.getenv("BUYER_AGENT_MODE", "smart"))
+
+
+def _create_web_agent():
+    return create_agent(model, mode=os.getenv("BUYER_AGENT_MODE", "smart"))
 
 # Serialize concurrent chat requests (Strands Agent is not thread-safe)
 agent_lock = asyncio.Lock()
@@ -233,7 +237,7 @@ async def chat(request: Request):
         full_response = ""
         try:
             async with agent_lock:
-                agent.messages.clear()
+                agent = _create_web_agent()
                 async for event in agent.stream_async(message):
                     if "data" in event:
                         chunk = event["data"]
@@ -254,10 +258,16 @@ async def chat(request: Request):
                 "data": json.dumps({"text": full_response}),
             }
         except Exception as exc:
+            err_text = str(exc)
+            if "max_tokens" in err_text.lower():
+                err_text = (
+                    "This request exceeded the model token budget. "
+                    "Try a narrower query or a seller that returns a shorter result."
+                )
             log(_logger, "WEB", "ERROR", f"chat stream error: {exc}")
             yield {
                 "event": "error",
-                "data": json.dumps({"error": str(exc)}),
+                "data": json.dumps({"error": err_text}),
             }
 
     return EventSourceResponse(event_generator())

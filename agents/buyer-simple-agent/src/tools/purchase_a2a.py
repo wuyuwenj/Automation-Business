@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from uuid import uuid4
 
 import httpx
@@ -33,12 +34,35 @@ def _error(message: str) -> dict:
     return {"status": "error", "content": [{"text": message}], "credits_used": 0}
 
 
+def _max_tool_response_chars() -> int:
+    raw = os.getenv("BUYER_MAX_TOOL_RESPONSE_CHARS", "4000").strip()
+    try:
+        return max(500, int(raw))
+    except ValueError:
+        return 4000
+
+
+def _truncate_tool_text(text: str) -> str:
+    """Cap seller responses before feeding them back into the agent loop."""
+    limit = _max_tool_response_chars()
+    if len(text) <= limit:
+        return text
+    omitted = len(text) - limit
+    return (
+        f"{text[:limit]}\n\n"
+        f"[truncated {omitted} additional characters to stay within the buyer token budget]"
+    )
+
+
 def _success(text: str, credits_used: int = 0) -> dict:
     """Build a standard success response."""
+    clipped = _truncate_tool_text(text)
     return {
         "status": "success",
-        "content": [{"text": text}],
-        "response": text,
+        "content": [{"text": clipped}],
+        "response": clipped,
+        "response_truncated": clipped != text,
+        "response_chars": len(text),
         "credits_used": credits_used,
     }
 
