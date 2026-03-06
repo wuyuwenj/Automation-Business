@@ -411,6 +411,7 @@ def main():
         port=port,
         hooks=hooks,
         custom_request_handler=handler,
+        host="0.0.0.0",
     )
 
     asyncio.run(result.server.serve())
