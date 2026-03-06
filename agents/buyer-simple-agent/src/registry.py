@@ -25,6 +25,7 @@ class SellerInfo:
     category: str = ""
     team_name: str = ""
     all_plan_ids: list[str] = field(default_factory=list)
+    has_free_plan: bool = False
 
 
 class SellerRegistry:
@@ -138,6 +139,7 @@ class SellerRegistry:
             category=seller_data.get("category", ""),
             team_name=seller_data.get("teamName", ""),
             all_plan_ids=plan_ids,
+            has_free_plan=bool(free_plans) if plan_pricing else False,
         )
 
         with self._lock:
@@ -198,6 +200,7 @@ class SellerRegistry:
                 "keywords": s.keywords,
                 "category": s.category,
                 "team_name": s.team_name,
+                "has_free_plan": s.has_free_plan,
             })
         return result
 

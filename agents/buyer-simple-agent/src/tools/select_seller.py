@@ -16,6 +16,14 @@ _logger = get_logger("buyer.select")
 # Probability of exploring a new seller even when an exploit choice exists
 EXPLORE_PROBABILITY = 0.2
 
+# Maximum failed explores before falling back to a known-good seller
+MAX_FAILED_EXPLORES = 2
+
+
+def _sort_candidates(sellers: list[dict]) -> list[dict]:
+    """Sort sellers: free-plan first, then by credits ascending."""
+    return sorted(sellers, key=lambda s: (0 if s.get("has_free_plan") else 1, s["credits"]))
+
 
 def select_seller_impl(
     query: str,
@@ -39,15 +47,16 @@ def select_seller_impl(
     all_sellers = seller_registry.list_all()
 
     # Filter out sellers that failed during this session
+    failed_count = 0
     if failed_sellers:
         pre_filter = len(all_sellers)
         all_sellers = [s for s in all_sellers if s["url"] not in failed_sellers]
-        if pre_filter != len(all_sellers):
+        failed_count = pre_filter - len(all_sellers)
+        if failed_count:
             log(_logger, "SELECT", "FILTER",
-                f"Skipped {pre_filter - len(all_sellers)} previously failed seller(s)")
+                f"Skipped {failed_count} previously failed seller(s)")
 
     if not all_sellers:
-        failed_count = len(failed_sellers) if failed_sellers else 0
         msg = "No sellers available."
         if failed_count:
             msg += f" ({failed_count} seller(s) were skipped due to previous failures.)"
@@ -65,29 +74,46 @@ def select_seller_impl(
     tried = [s for s in all_sellers if s["url"] in tried_urls]
     untried = [s for s in all_sellers if s["url"] not in tried_urls]
 
+    # If too many failed explores this session, skip exploration and use known-good
+    should_force_exploit = failed_count >= MAX_FAILED_EXPLORES and tried
+
     decision = ""
     selected = None
 
-    if not tried_urls:
+    if should_force_exploit:
+        # Too many failures — fall back to best known-good seller
+        best_url = category_stats.get("best_seller", {}).get("url")
+        selected = next(
+            (s for s in all_sellers if s["url"] == best_url),
+            tried[0] if tried else all_sellers[0],
+        )
+        decision = (
+            f"EXPLOIT (failsafe): {failed_count} seller(s) failed this session. "
+            f"Falling back to known-good seller '{selected['name']}' "
+            f"instead of continuing to explore."
+        )
+
+    elif not tried_urls:
         # EXPLORE: Never bought in this category before
-        # Pick cheapest relevant seller to minimize exploration cost
-        candidates = sorted(all_sellers, key=lambda s: s["credits"])
+        # Pick free-plan seller first, then cheapest
+        candidates = _sort_candidates(all_sellers)
         selected = candidates[0]
+        free_tag = " (FREE plan)" if selected.get("has_free_plan") else ""
         decision = (
             f"EXPLORE: No purchase history for category '{query_category}'. "
-            f"Starting with cheapest seller '{selected['name']}' "
+            f"Starting with '{selected['name']}'{free_tag} "
             f"({selected['credits']} credit(s)) to minimize exploration cost."
         )
 
     elif len(tried_urls) < 2:
         # EXPLORE: Only tried one seller, need comparison
         if untried:
-            # Pick cheapest untried seller
-            candidates = sorted(untried, key=lambda s: s["credits"])
+            candidates = _sort_candidates(untried)
             selected = candidates[0]
+            free_tag = " (FREE plan)" if selected.get("has_free_plan") else ""
             decision = (
                 f"EXPLORE: Only tried 1 seller for '{query_category}'. "
-                f"Trying '{selected['name']}' for comparison. "
+                f"Trying '{selected['name']}'{free_tag} for comparison. "
                 f"Need at least 2 sellers to make an informed decision."
             )
         else:
@@ -105,11 +131,12 @@ def select_seller_impl(
         should_explore = untried and random.random() < EXPLORE_PROBABILITY
 
         if should_explore:
-            candidates = sorted(untried, key=lambda s: s["credits"])
+            candidates = _sort_candidates(untried)
             selected = candidates[0]
+            free_tag = " (FREE plan)" if selected.get("has_free_plan") else ""
             decision = (
                 f"EXPLORE (periodic re-evaluation): Already tried {len(tried_urls)} sellers "
-                f"for '{query_category}', but checking if '{selected['name']}' "
+                f"for '{query_category}', but checking if '{selected['name']}'{free_tag} "
                 f"offers better value."
             )
         else:
@@ -140,11 +167,13 @@ def select_seller_impl(
         f"Seller selection for category '{query_category}':",
         f"  Selected: {selected['name']} ({selected['url']})",
         f"  Cost: {selected['cost_description'] or str(selected['credits']) + ' credit(s)'}",
+        f"  Free plan: {'yes' if selected.get('has_free_plan') else 'no'}",
         f"  Decision: {decision}",
         "",
         f"  Available sellers: {len(all_sellers)}",
         f"  Tried for this category: {len(tried_urls)}",
         f"  Untried: {len(untried)}",
+        f"  Failed this session: {failed_count}",
     ]
 
     return {
