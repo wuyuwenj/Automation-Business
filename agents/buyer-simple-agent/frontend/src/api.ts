@@ -39,6 +39,19 @@ export interface ChatMessage {
   toolUse?: string;
 }
 
+function getZeroClickSessionId(): string {
+  const storageKey = "zeroclick_session_id";
+  try {
+    const existing = window.localStorage.getItem(storageKey);
+    if (existing) return existing;
+    const created = window.crypto?.randomUUID?.() ?? `zc-${Date.now()}`;
+    window.localStorage.setItem(storageKey, created);
+    return created;
+  } catch {
+    return `zc-${Date.now()}`;
+  }
+}
+
 export async function fetchSellers(): Promise<Seller[]> {
   const res = await fetch("/api/sellers");
   if (!res.ok) return [];
@@ -76,7 +89,11 @@ export async function fetchZeroClickOffers(query?: string): Promise<ZeroClickOff
     const url = query
       ? `/api/zeroclick/offers?query=${encodeURIComponent(query)}`
       : "/api/zeroclick/offers";
-    const res = await fetch(url);
+    const res = await fetch(url, {
+      headers: {
+        "x-zc-session-id": getZeroClickSessionId(),
+      },
+    });
     if (!res.ok) return [];
     const data = await res.json();
     return Array.isArray(data.offers) ? data.offers : [];

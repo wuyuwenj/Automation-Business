@@ -10,34 +10,13 @@ from ..registry import SellerRegistry
 _logger = get_logger("buyer.filter")
 
 
-def filter_sellers_impl(
-    query: str,
-    seller_registry: SellerRegistry,
-) -> dict:
-    """Find the most relevant sellers for a query using free metadata.
-
-    Scores sellers by keyword overlap, category match, and description
-    relevance. No credits spent — pure metadata matching.
-
-    Args:
-        query: The user's query to match against seller capabilities.
-        seller_registry: Registry of available sellers.
-
-    Returns:
-        Dict with ranked sellers and match reasoning.
-    """
-    all_sellers = seller_registry.list_all(verbose=True)
-    if not all_sellers:
-        return {
-            "status": "error",
-            "content": [{"text": "No sellers available. Use discover_marketplace first."}],
-        }
-
+def _score_sellers(query: str, sellers: list[dict]) -> list[dict]:
+    """Attach relevance scores and reasons to seller metadata."""
     query_lower = query.lower()
     query_words = set(query_lower.split())
 
     scored = []
-    for seller in all_sellers:
+    for seller in sellers:
         score = 0
         reasons = []
 
@@ -78,9 +57,37 @@ def filter_sellers_impl(
             "match_reasons": reasons,
         })
 
-    # Sort by relevance score descending
     scored.sort(key=lambda s: s["relevance_score"], reverse=True)
-    top = scored[:3]  # Return top 3 to save context
+    return scored
+
+
+def rank_sellers_for_query(
+    query: str,
+    seller_registry: SellerRegistry | None = None,
+    sellers: list[dict] | None = None,
+    max_results: int = 3,
+) -> list[dict]:
+    """Rank sellers for a query using free metadata only."""
+    seller_rows = sellers if sellers is not None else (
+        seller_registry.list_all(verbose=True) if seller_registry else []
+    )
+    if not seller_rows:
+        return []
+    scored = _score_sellers(query, seller_rows)
+    return scored[:max_results]
+
+
+def filter_sellers_impl(
+    query: str,
+    seller_registry: SellerRegistry,
+) -> dict:
+    """Find the most relevant sellers for a query using free metadata."""
+    top = rank_sellers_for_query(query, seller_registry=seller_registry, max_results=3)
+    if not top:
+        return {
+            "status": "error",
+            "content": [{"text": "No sellers available. Use discover_marketplace first."}],
+        }
 
     log(_logger, "FILTER", "MATCHED",
         f"query='{query[:50]}' top_match={top[0]['name'] if top else 'none'} "

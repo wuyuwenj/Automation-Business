@@ -8,6 +8,8 @@ Used by the smart buyer agent to make explore/exploit decisions.
 """
 
 import json
+import hashlib
+import re
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -65,6 +67,16 @@ class PurchaseLedger:
         self._lock = threading.Lock()
         self._records: list[PurchaseRecord] = []
         self._load()
+
+    @staticmethod
+    def make_task_key(query: str, query_category: str = "") -> str:
+        """Build a stable key for grouping equivalent questions."""
+        normalized = re.sub(r"[^a-z0-9]+", " ", query.lower()).strip()
+        words = normalized.split()
+        slug = "-".join(words[:8]) or "task"
+        prefix = (query_category or "general").strip().lower() or "general"
+        digest = hashlib.sha1(f"{prefix}:{normalized}".encode("utf-8")).hexdigest()[:10]
+        return f"{prefix}:{slug[:64]}:{digest}"
 
     def _load(self):
         """Load existing records from disk."""

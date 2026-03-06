@@ -23,6 +23,7 @@ export default function App() {
   const [streamingText, setStreamingText] = useState("");
   const [currentTool, setCurrentTool] = useState("");
   const [_balance, setBalance] = useState<Record<string, unknown> | null>(null);
+  const [lastSubmittedAdQuery, setLastSubmittedAdQuery] = useState("");
 
   // Poll sellers every 5 seconds
   useEffect(() => {
@@ -64,6 +65,7 @@ export default function App() {
 
   const handleSend = useCallback(
     async (message: string) => {
+      setLastSubmittedAdQuery(message);
       setMessages((prev) => [...prev, { role: "user", text: message }]);
       setIsStreaming(true);
       setStreamingText("");
@@ -120,7 +122,7 @@ export default function App() {
           <div className="flex-1 min-h-0">
             <SellerSidebar sellers={sellers} />
           </div>
-          <AdBanner />
+          <AdBanner intentQuery={lastSubmittedAdQuery} />
         </div>
 
         {/* Chat panel */}

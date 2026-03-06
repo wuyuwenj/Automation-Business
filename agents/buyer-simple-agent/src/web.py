@@ -51,12 +51,15 @@ from .registration_server import RegistrationExecutor, _build_buyer_agent_card
 from .strands_agent import (
     NVM_PLAN_ID,
     budget,
+    comparison_memory,
     create_agent,
     ledger,
     payments,
     seller_registry,
 )
 from .tools.balance import check_balance_impl
+from .zeroclick_mcp import ZeroClickMCPClient
+from .zeroclick import build_offer_query, build_session_user_id, infer_signals
 
 BUYER_PORT = int(os.getenv("BUYER_PORT", "8000"))
 
@@ -99,6 +102,90 @@ async def _log_dispatcher():
 _logger = get_logger("buyer.web")
 
 app = FastAPI(title="Buyer Agent Web")
+_zeroclick_mcp = ZeroClickMCPClient()
+
+
+def _zeroclick_signals_enabled() -> bool:
+    raw = os.getenv("ZEROCLICK_SIGNALS_ENABLED", "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _zeroclick_mcp_enabled() -> bool:
+    raw = os.getenv("ZEROCLICK_MCP_ENABLED", "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _zeroclick_llm_model() -> str:
+    explicit = os.getenv("ZEROCLICK_LLM_MODEL", "").strip()
+    if explicit:
+        return explicit[:64]
+    model_id = os.getenv("MODEL_ID", "gpt-4o").strip() or "gpt-4o"
+    return f"openai/{model_id}"[:64]
+
+
+def _client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "").strip()
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return "127.0.0.1"
+
+
+async def _broadcast_zeroclick_signals(request: Request, query: str) -> None:
+    api_key = os.getenv("ZEROCLICK_API_KEY", "").strip()
+    if not api_key or not _zeroclick_signals_enabled():
+        return
+
+    signals = infer_signals(query)
+    if not signals:
+        return
+
+    ip_address = _client_ip(request)
+    session_id = request.headers.get("x-zc-session-id", "").strip()
+    user_id = build_session_user_id(session_id, ip_address)
+    user_agent = request.headers.get("user-agent", "")
+    user_locale = request.headers.get("accept-language", "en-US").split(",")[0].strip() or "en-US"
+    body = {
+        "userId": user_id,
+        "ipAddress": ip_address,
+        "signals": signals,
+    }
+
+    try:
+        if _zeroclick_mcp_enabled():
+            _zeroclick_mcp.configure_session(
+                user_id,
+                api_key,
+                llm_model=_zeroclick_llm_model(),
+                user_id=user_id,
+                user_session_id=session_id or user_id,
+                user_locale=user_locale,
+                grouping_id="buyer-web-chat",
+                user_ip=ip_address,
+                user_agent=user_agent,
+            )
+            await _zeroclick_mcp.broadcast_signal(user_id, api_key, signals)
+        else:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    "https://zeroclick.dev/api/v2/signals",
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-zc-api-key": api_key,
+                    },
+                    json=body,
+                )
+                resp.raise_for_status()
+        primary = signals[0]
+        log(
+            _logger,
+            "ZEROCLICK",
+            "MCP_SIGNAL" if _zeroclick_mcp_enabled() else "SIGNAL",
+            f"category={primary.get('category')} subject={primary.get('subject', '')[:60]}",
+        )
+    except Exception as exc:
+        log(_logger, "ZEROCLICK", "ERROR", f"signal broadcast failed: {exc}")
 
 
 @app.on_event("startup")
@@ -199,6 +286,9 @@ async def get_config():
     return JSONResponse(content={
         "zeroclickEnabled": bool(os.getenv("ZEROCLICK_API_KEY")),
         "zeroclickQuery": os.getenv("ZEROCLICK_QUERY", "AI tools for business"),
+        "zeroclickDynamicAds": True,
+        "zeroclickSignalCollectionEnabled": _zeroclick_signals_enabled(),
+        "zeroclickMcpEnabled": _zeroclick_mcp_enabled(),
     })
 
 
@@ -212,13 +302,16 @@ async def get_zeroclick_offers(request: Request):
             status_code=503,
         )
 
-    query = (request.query_params.get("query") or os.getenv("ZEROCLICK_QUERY", "")).strip()
-    if not query:
-        query = "AI tools for business"
+    raw_query = (request.query_params.get("query") or "").strip()
+    fallback_query = os.getenv("ZEROCLICK_QUERY", "AI tools for business")
+    query = build_offer_query(raw_query, fallback_query)
+
+    if raw_query and _zeroclick_signals_enabled():
+        asyncio.create_task(_broadcast_zeroclick_signals(request, query))
 
     payload = {
         "method": "server",
-        "ipAddress": (request.client.host if request.client else "127.0.0.1"),
+        "ipAddress": _client_ip(request),
         "userAgent": request.headers.get("user-agent", ""),
         "query": query,
         "limit": 1,
@@ -250,7 +343,48 @@ async def get_zeroclick_offers(request: Request):
             status_code=502,
         )
 
-    return JSONResponse(content={"offers": offers})
+    return JSONResponse(content={"offers": offers, "appliedQuery": query})
+
+
+@app.get("/api/zeroclick/mcp/status")
+async def get_zeroclick_mcp_status(request: Request):
+    """Return ZeroClick MCP session diagnostics for the current web session."""
+    api_key = os.getenv("ZEROCLICK_API_KEY", "").strip()
+    if not api_key:
+        return JSONResponse(
+            content={"connected": False, "error": "ZEROCLICK_API_KEY not configured"},
+            status_code=503,
+        )
+
+    session_id = request.headers.get("x-zc-session-id", "").strip()
+    session_key = build_session_user_id(session_id, _client_ip(request))
+
+    try:
+        if _zeroclick_mcp_enabled():
+            _zeroclick_mcp.configure_session(
+                session_key,
+                api_key,
+                llm_model=_zeroclick_llm_model(),
+                user_id=session_key,
+                user_session_id=session_id or session_key,
+                user_locale=request.headers.get("accept-language", "en-US").split(",")[0].strip() or "en-US",
+                grouping_id="buyer-web-chat",
+                user_ip=_client_ip(request),
+                user_agent=request.headers.get("user-agent", ""),
+            )
+            await _zeroclick_mcp.ensure_initialized(session_key, api_key)
+        status = _zeroclick_mcp.get_status(session_key)
+        status["mcp_enabled"] = _zeroclick_mcp_enabled()
+        return JSONResponse(content=status)
+    except Exception as exc:
+        return JSONResponse(
+            content={
+                "connected": False,
+                "mcp_enabled": _zeroclick_mcp_enabled(),
+                "error": str(exc),
+            },
+            status_code=502,
+        )
 
 
 @app.get("/ping")
@@ -302,6 +436,12 @@ async def get_ledger_records():
     from dataclasses import asdict
     records = ledger.get_all_records()
     return JSONResponse(content=[asdict(r) for r in records])
+
+
+@app.get("/api/ledger/comparisons")
+async def get_task_comparisons():
+    """Return task-level two-seller comparison memory."""
+    return JSONResponse(content=comparison_memory.list_all())
 
 
 # ---------------------------------------------------------------------------

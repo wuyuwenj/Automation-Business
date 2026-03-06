@@ -4,10 +4,16 @@ import { Badge } from "@/components/ui/badge";
 import { fetchConfig, fetchZeroClickOffers, type ZeroClickOffer } from "@/api";
 
 const IMPRESSIONS_URL = "https://zeroclick.dev/api/v2/impressions";
+const FETCH_DELAY_MS = 2500;
 
-export default function AdBanner() {
+interface AdBannerProps {
+  intentQuery?: string;
+}
+
+export default function AdBanner({ intentQuery = "" }: AdBannerProps) {
   const trackedIds = useRef<Set<string>>(new Set());
   const [enabled, setEnabled] = useState(false);
+  const [defaultQuery, setDefaultQuery] = useState("");
   const [query, setQuery] = useState("");
   const [offer, setOffer] = useState<ZeroClickOffer | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -22,13 +28,25 @@ export default function AdBanner() {
           return;
         }
         setEnabled(true);
-        setQuery(data.zeroclickQuery || "AI tools for business");
+        setDefaultQuery(data.zeroclickQuery || "AI tools for business");
       })
       .catch(() => {
         setEnabled(false);
         setIsLoading(false);
       });
   }, []);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const nextQuery = (intentQuery.trim() || defaultQuery).trim();
+    if (!nextQuery) return;
+
+    const timeoutId = window.setTimeout(() => {
+      setQuery(nextQuery);
+    }, FETCH_DELAY_MS);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [defaultQuery, enabled, intentQuery]);
 
   useEffect(() => {
     if (!enabled || !query) return;

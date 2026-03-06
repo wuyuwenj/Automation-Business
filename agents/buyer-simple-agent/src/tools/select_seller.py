@@ -7,9 +7,11 @@ for hackathon judges to see.
 
 import random
 
+from ..comparison_memory import TaskComparisonMemory
 from ..ledger import PurchaseLedger
 from ..log import get_logger, log
 from ..registry import SellerRegistry
+from .filter_sellers import rank_sellers_for_query
 
 _logger = get_logger("buyer.select")
 
@@ -38,6 +40,7 @@ def select_seller_impl(
     query_category: str,
     seller_registry: SellerRegistry,
     ledger: PurchaseLedger,
+    comparison_memory: TaskComparisonMemory | None = None,
     failed_sellers: set[str] | None = None,
 ) -> dict:
     """Select the best seller for a query using explore/exploit logic.
@@ -52,7 +55,7 @@ def select_seller_impl(
     Returns:
         Dict with selected seller info and reasoning.
     """
-    all_sellers = seller_registry.list_all()
+    all_sellers = seller_registry.list_all(verbose=True)
 
     # Filter out sellers that failed during this session
     failed_count = 0
@@ -73,6 +76,119 @@ def select_seller_impl(
             "status": "error",
             "content": [{"text": msg}],
         }
+
+    seller_map = {seller["url"]: seller for seller in all_sellers}
+    ranked_candidates = rank_sellers_for_query(
+        query,
+        sellers=all_sellers,
+        max_results=max(5, len(all_sellers)),
+    )
+    relevant_candidates = [
+        seller for seller in ranked_candidates
+        if seller.get("relevance_score", 0) > 0
+    ]
+    if not relevant_candidates:
+        relevant_candidates = _sort_candidates(all_sellers)
+
+    if comparison_memory:
+        comparison = comparison_memory.get_for_query(query, query_category)
+        if comparison and comparison.needs_rebrowse:
+            previous_urls = {
+                slot.seller_url for slot in comparison.sellers() if slot.seller_url
+            }
+            if len(relevant_candidates) > len(previous_urls):
+                comparison = comparison_memory.ensure_pair(
+                    query=query,
+                    query_category=query_category,
+                    candidate_sellers=relevant_candidates,
+                    exclude_urls=previous_urls,
+                    force_replace=True,
+                )
+        else:
+            comparison = comparison_memory.ensure_pair(
+                query=query,
+                query_category=query_category,
+                candidate_sellers=relevant_candidates,
+            )
+
+        if comparison:
+            pair_slots = [comparison.seller_a, comparison.seller_b]
+            pair_sellers = [
+                seller_map[slot.seller_url]
+                for slot in pair_slots
+                if slot.seller_url in seller_map
+            ]
+            if pair_sellers:
+                untested_slots = [
+                    slot for slot in pair_slots
+                    if slot.seller_url and not slot.tested and slot.seller_url in seller_map
+                ]
+                if untested_slots:
+                    slot = untested_slots[0]
+                    selected = seller_map[slot.seller_url]
+                    tested_count = sum(1 for pair_slot in pair_slots if pair_slot.tested)
+                    decision = (
+                        f"TASK_COMPARE: task pair for '{query_category}' is "
+                        f"'{comparison.seller_a.seller_name or comparison.seller_a.seller_url}' vs "
+                        f"'{comparison.seller_b.seller_name or comparison.seller_b.seller_url or 'pending'}'. "
+                        f"Selecting '{selected['name']}' as comparison step {tested_count + 1}/2."
+                    )
+                    log(_logger, "SELECT", "DECISION", decision)
+                    return {
+                        "status": "success",
+                        "content": [{"text": "\n".join([
+                            f"Seller selection for category '{query_category}':",
+                            f"  Task key: {comparison.task_key}",
+                            f"  Selected: {selected['name']} ({selected['url']})",
+                            f"  Cost: {selected['cost_description'] or str(selected['credits']) + ' credit(s)'}",
+                            f"  Decision: {decision}",
+                            f"  Pair: {comparison.seller_a.seller_name or comparison.seller_a.seller_url} vs "
+                            f"{comparison.seller_b.seller_name or comparison.seller_b.seller_url or 'pending'}",
+                        ])}],
+                        "selected_seller": {
+                            "name": selected["name"],
+                            "url": selected["url"],
+                            "credits": selected["credits"],
+                            "cost_description": selected["cost_description"],
+                        },
+                        "decision": decision,
+                        "phase": "compare",
+                        "task_key": comparison.task_key,
+                    }
+
+                preferred_url = comparison.preferred_seller_url
+                preferred = seller_map.get(preferred_url, None) if preferred_url else None
+                if preferred and not comparison.needs_rebrowse:
+                    decision = (
+                        f"TASK_EXPLOIT: Reusing preferred seller '{preferred['name']}' for task "
+                        f"'{comparison.task_key}'. Stored pair scores are above the minimum "
+                        f"acceptable score ({comparison.minimum_acceptable_score:.1f})."
+                    )
+                    log(_logger, "SELECT", "DECISION", decision)
+                    return {
+                        "status": "success",
+                        "content": [{"text": "\n".join([
+                            f"Seller selection for category '{query_category}':",
+                            f"  Task key: {comparison.task_key}",
+                            f"  Selected: {preferred['name']} ({preferred['url']})",
+                            f"  Cost: {preferred['cost_description'] or str(preferred['credits']) + ' credit(s)'}",
+                            f"  Decision: {decision}",
+                            f"  Pair scores: "
+                            f"{comparison.seller_a.seller_name or comparison.seller_a.seller_url}="
+                            f"{comparison.seller_a.quality_score:.1f}, "
+                            f"{comparison.seller_b.seller_name or comparison.seller_b.seller_url}="
+                            f"{comparison.seller_b.quality_score:.1f}",
+                        ])}],
+                        "selected_seller": {
+                            "name": preferred["name"],
+                            "url": preferred["url"],
+                            "credits": preferred["credits"],
+                            "cost_description": preferred["cost_description"],
+                        },
+                        "decision": decision,
+                        "phase": "exploit",
+                        "task_key": comparison.task_key,
+                    }
 
     # Get which sellers we've tried for this category
     tried_urls = ledger.get_sellers_tried_for_category(query_category)

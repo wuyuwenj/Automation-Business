@@ -26,6 +26,7 @@ from strands.agent.conversation_manager import SlidingWindowConversationManager
 from payments_py import Payments, PaymentOptions
 
 from .budget import Budget
+from .comparison_memory import TaskComparisonMemory
 from .ledger import PurchaseLedger
 from .log import get_logger, log
 from .payment_diagnostics import diagnose_error
@@ -65,6 +66,7 @@ payments = Payments.get_instance(
 
 budget = Budget(max_daily=MAX_DAILY_SPEND, max_per_request=MAX_PER_REQUEST)
 ledger = PurchaseLedger()
+comparison_memory = TaskComparisonMemory()
 
 _logger = get_logger("buyer.tools")
 
@@ -487,7 +489,14 @@ def select_seller(query: str, query_category: str) -> dict:
         query: The user's query.
         query_category: e.g. "research", "defi", "analysis", "data".
     """
-    return select_seller_impl(query, query_category, seller_registry, ledger, _failed_sellers)
+    return select_seller_impl(
+        query,
+        query_category,
+        seller_registry,
+        ledger,
+        comparison_memory,
+        _failed_sellers,
+    )
 
 
 @tool
@@ -507,6 +516,7 @@ def evaluate_purchase(
     """Score a purchase response (0-2 each: relevance, depth, actionability, specificity)."""
     return evaluate_purchase_impl(
         ledger=ledger,
+        comparison_memory=comparison_memory,
         query=query,
         query_category=query_category,
         seller_url=seller_url,
@@ -604,11 +614,13 @@ Do not call purchase a second time. Budget exceeded → explain and stop."""
 _SMART_BUYER_PROMPT = """\
 You buy data from marketplace sellers. Steps (in order, each once):
 1. discover_marketplace — load sellers (once per session).
-2. select_seller — picks best seller (pass query_category like "research","defi","analysis").
+2. select_seller — narrows the task to a 2-seller comparison pair and picks the next seller to test
+   or the learned preferred seller (pass query_category like "research","defi","analysis").
    MUST use the URL it returns.
 3. purchase_a2a — buy from that exact URL.
 4. evaluate_purchase — score response (relevance/depth/actionability/specificity, 0-2 each).
-Report: data received, seller chosen, quality score, credits spent.
+Report: data received, seller chosen, task key, quality score, credits spent, and whether the
+task now prefers one seller or needs to re-browse.
 """ + _GUIDELINES
 
 _A2A_PROMPT = """\

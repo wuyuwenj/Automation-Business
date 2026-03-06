@@ -4,6 +4,7 @@ After each purchase, the agent calls this to score the response
 on 4 dimensions, calculate ROI, and record in the purchase ledger.
 """
 
+from ..comparison_memory import TaskComparisonMemory
 from ..ledger import Evaluation, PurchaseLedger
 from ..log import get_logger, log
 
@@ -12,6 +13,7 @@ _logger = get_logger("buyer.evaluate")
 
 def evaluate_purchase_impl(
     ledger: PurchaseLedger,
+    comparison_memory: TaskComparisonMemory | None,
     query: str,
     query_category: str,
     seller_url: str,
@@ -61,6 +63,19 @@ def evaluate_purchase_impl(
         evaluation=evaluation,
     )
 
+    task_comparison = None
+    if comparison_memory:
+        task_comparison = comparison_memory.record_result(
+            query=query,
+            query_category=query_category,
+            seller_url=seller_url,
+            seller_name=seller_name,
+            quality_score=record.quality_score,
+            roi=record.roi,
+            purchase_id=record.id,
+            reasoning=reasoning,
+        )
+
     log(_logger, "EVALUATE", "SCORED",
         f"{seller_name}: quality={record.quality_score}/8 roi={record.roi:.1f} "
         f"[rel={relevance} dep={depth} act={actionability} spec={specificity}]")
@@ -71,6 +86,7 @@ def evaluate_purchase_impl(
 
     lines = [
         f"Evaluation recorded for purchase from {seller_name}:",
+        f"  Task key: {(task_comparison.task_key if task_comparison else ledger.make_task_key(query, query_category))}",
         f"  Quality: {record.quality_score}/8 "
         f"(relevance={relevance}, depth={depth}, actionability={actionability}, specificity={specificity})",
         f"  Cost: {credits_spent} credit(s)",
@@ -93,6 +109,18 @@ def evaluate_purchase_impl(
                 f"  {stats['name']}: avg ROI {stats['avg_roi']:.1f} "
                 f"({stats['purchases']} purchases){marker}"
             )
+
+    if task_comparison:
+        preferred = task_comparison.preferred_seller_url or "not decided yet"
+        lines.extend([
+            "",
+            "Task comparison memory:",
+            f"  Pair: {task_comparison.seller_a.seller_name or task_comparison.seller_a.seller_url} vs "
+            f"{task_comparison.seller_b.seller_name or task_comparison.seller_b.seller_url or 'pending'}",
+            f"  Preferred seller URL: {preferred}",
+            f"  Needs re-browse: {'yes' if task_comparison.needs_rebrowse else 'no'}",
+            f"  Minimum acceptable score: {task_comparison.minimum_acceptable_score:.1f}",
+        ])
 
     log(_logger, "EVALUATE", "COMPARISON",
         f"category={query_category} sellers_tried={len(category_stats.get('sellers_tried', []))}")
