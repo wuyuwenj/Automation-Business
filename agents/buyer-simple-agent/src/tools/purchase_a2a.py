@@ -68,14 +68,16 @@ def purchase_a2a_impl(
     Returns:
         dict with status, content (for Strands), response text, and credits_used.
     """
+    # Normalize empty agent_id to None — the backend rejects "" but accepts None
+    effective_agent_id = agent_id if agent_id else None
     log(_logger, "A2A_CLIENT", "CONNECT",
-        f"url={agent_url} plan={plan_id[:12]} agent={agent_id[:12]}")
+        f"url={agent_url} plan={plan_id[:12]} agent={effective_agent_id or '(none)'}")
     try:
         token_options = build_token_options(payments, plan_id)
         client = _client_class(
             agent_base_url=agent_url,
             payments=payments,
-            agent_id=agent_id,
+            agent_id=effective_agent_id,
             plan_id=plan_id,
             delegation_config=token_options.delegation_config,
         )

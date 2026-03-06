@@ -24,6 +24,7 @@ class SellerInfo:
     keywords: list[str] = field(default_factory=list)
     category: str = ""
     team_name: str = ""
+    all_plan_ids: list[str] = field(default_factory=list)
 
 
 class SellerRegistry:
@@ -105,10 +106,22 @@ class SellerRegistry:
         url = endpoint.rstrip("/")
 
         # Extract plan IDs from both old format (planIds) and new format (planPricing)
+        plan_pricing = seller_data.get("planPricing", [])
         plan_ids = seller_data.get("planIds", [])
         if not plan_ids:
-            plan_pricing = seller_data.get("planPricing", [])
             plan_ids = [p.get("planDid", "") for p in plan_pricing if p.get("planDid")]
+
+        # Prefer free plans (price=0) so we can auto-subscribe without USDC
+        primary_plan = ""
+        if plan_pricing:
+            free_plans = [p.get("planDid", "") for p in plan_pricing
+                          if p.get("planPrice", 999) == 0 and p.get("planDid")]
+            paid_plans = [p.get("planDid", "") for p in plan_pricing
+                          if p.get("planPrice", 999) > 0 and p.get("planDid")]
+            primary_plan = (free_plans[0] if free_plans
+                            else paid_plans[0] if paid_plans else "")
+        elif plan_ids:
+            primary_plan = plan_ids[0]
 
         pricing = seller_data.get("pricing", {})
 
@@ -117,13 +130,14 @@ class SellerRegistry:
             name=seller_data.get("name", "Unknown"),
             description=seller_data.get("description", ""),
             skills=[{"name": kw} for kw in seller_data.get("keywords", [])[:5]],
-            plan_id=plan_ids[0] if plan_ids else "",
+            plan_id=primary_plan,
             agent_id=seller_data.get("nvmAgentId", ""),
             credits=1,
             cost_description=pricing.get("perRequest", ""),
             keywords=seller_data.get("keywords", []),
             category=seller_data.get("category", ""),
             team_name=seller_data.get("teamName", ""),
+            all_plan_ids=plan_ids,
         )
 
         with self._lock:
@@ -162,6 +176,7 @@ class SellerRegistry:
             "planId": info.plan_id,
             "agentId": info.agent_id,
             "credits": info.credits,
+            "allPlanIds": info.all_plan_ids,
         }
 
     def list_all(self) -> list[dict]:

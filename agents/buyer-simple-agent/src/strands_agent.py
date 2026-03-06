@@ -300,14 +300,39 @@ def purchase_a2a(query: str, agent_url: str = "") -> dict:
             "credits_used": 0,
         }
 
-    # Auto-subscribe: check if we're subscribed, order plan if not
+    # Auto-subscribe: check if we're subscribed, order plan if not.
+    # If ordering the primary plan fails (e.g. requires USDC), try alternative plans.
+    all_plan_ids = cached.get("allPlanIds", []) if cached else []
     try:
         balance_result = payments.plans.get_plan_balance(plan_id)
         if not balance_result.is_subscriber:
             log(_logger, "TOOLS", "PURCHASE",
                 f"Not subscribed to plan {plan_id[:12]}... auto-ordering")
-            payments.plans.order_plan(plan_id)
-            log(_logger, "TOOLS", "PURCHASE", "Plan ordered successfully")
+            try:
+                payments.plans.order_plan(plan_id)
+                log(_logger, "TOOLS", "PURCHASE", "Plan ordered successfully")
+            except Exception as order_err:
+                log(_logger, "TOOLS", "PURCHASE",
+                    f"Order failed for primary plan: {order_err}")
+                # Try alternative plans (different payment scheme)
+                ordered = False
+                for alt_plan in all_plan_ids:
+                    if alt_plan == plan_id:
+                        continue
+                    try:
+                        log(_logger, "TOOLS", "PURCHASE",
+                            f"Trying alternative plan {alt_plan[:12]}...")
+                        payments.plans.order_plan(alt_plan)
+                        log(_logger, "TOOLS", "PURCHASE",
+                            f"Alternative plan ordered! Switching to {alt_plan[:12]}")
+                        plan_id = alt_plan
+                        ordered = True
+                        break
+                    except Exception:
+                        continue
+                if not ordered:
+                    log(_logger, "TOOLS", "PURCHASE",
+                        "All plan orders failed (continuing with token anyway)")
     except Exception as e:
         log(_logger, "TOOLS", "PURCHASE",
             f"Balance/order check failed (continuing anyway): {e}")
