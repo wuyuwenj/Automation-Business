@@ -21,8 +21,16 @@ MAX_FAILED_EXPLORES = 2
 
 
 def _sort_candidates(sellers: list[dict]) -> list[dict]:
-    """Sort sellers: free-plan first, then by credits ascending."""
-    return sorted(sellers, key=lambda s: (0 if s.get("has_free_plan") else 1, s["credits"]))
+    """Sort sellers: agent_id resolved first, then free-plan, then by credits ascending.
+
+    Sellers without a resolved agent_id are very likely to fail (403) because
+    their Discovery API plan IDs don't match the sandbox environment.
+    """
+    return sorted(sellers, key=lambda s: (
+        0 if s.get("has_agent_id") else 1,
+        0 if s.get("has_free_plan") else 1,
+        s["credits"],
+    ))
 
 
 def select_seller_impl(

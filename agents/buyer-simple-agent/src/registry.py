@@ -215,6 +215,7 @@ class SellerRegistry:
                 "category": s.category,
                 "team_name": s.team_name,
                 "has_free_plan": s.has_free_plan,
+                "has_agent_id": bool(s.agent_id),
             })
         return result
 
