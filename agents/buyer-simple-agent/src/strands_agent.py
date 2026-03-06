@@ -338,7 +338,8 @@ def list_sellers() -> dict:
 
     lines = [f"Sellers ({len(sellers)}):"]
     for s in sellers:
-        lines.append(f"  - {s['name']} [{s.get('category','?')}] {s['credits']}cr ({s['url']})")
+        free = " FREE" if s.get("has_free_plan") else ""
+        lines.append(f"  - {s['name']} [{s.get('category','?')}] {s['credits']}cr{free} ({s['url']})")
 
     return {
         "status": "success",

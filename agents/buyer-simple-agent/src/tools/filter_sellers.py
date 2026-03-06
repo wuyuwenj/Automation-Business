@@ -26,7 +26,7 @@ def filter_sellers_impl(
     Returns:
         Dict with ranked sellers and match reasoning.
     """
-    all_sellers = seller_registry.list_all()
+    all_sellers = seller_registry.list_all(verbose=True)
     if not all_sellers:
         return {
             "status": "error",

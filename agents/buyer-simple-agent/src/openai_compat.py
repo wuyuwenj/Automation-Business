@@ -48,6 +48,6 @@ def create_openai_model() -> OpenAIModel:
     max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "16384"))
     return OpenAIModel(
         client_args=build_openai_client_args(),
-        model_id=os.getenv("MODEL_ID", "gpt-4o-mini"),
+        model_id=os.getenv("MODEL_ID", "gpt-5.4"),
         params={"max_tokens": max_tokens},
     )

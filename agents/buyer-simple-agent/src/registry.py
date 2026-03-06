@@ -195,28 +195,37 @@ class SellerRegistry:
             "allPlanIds": info.all_plan_ids,
         }
 
-    def list_all(self) -> list[dict]:
-        """Return a summary list of all registered sellers."""
+    def list_all(self, verbose: bool = False) -> list[dict]:
+        """Return a summary list of all registered sellers.
+
+        Args:
+            verbose: If True, include description, skills, keywords, team_name.
+                     If False (default), return only minimal fields to save tokens.
+        """
         with self._lock:
             sellers = list(self._sellers.values())
         result = []
         for s in sellers:
-            skill_names = [
-                sk.get("name", sk.get("id", "unknown")) for sk in s.skills
-            ]
-            result.append({
+            entry = {
                 "url": s.url,
                 "name": s.name,
-                "description": s.description,
-                "skills": skill_names,
+                "category": s.category,
                 "credits": s.credits,
                 "cost_description": s.cost_description,
-                "keywords": s.keywords,
-                "category": s.category,
-                "team_name": s.team_name,
                 "has_free_plan": s.has_free_plan,
                 "has_agent_id": bool(s.agent_id),
-            })
+            }
+            if verbose:
+                skill_names = [
+                    sk.get("name", sk.get("id", "unknown")) for sk in s.skills
+                ]
+                entry.update({
+                    "description": s.description,
+                    "skills": skill_names,
+                    "keywords": s.keywords,
+                    "team_name": s.team_name,
+                })
+            result.append(entry)
         return result
 
     def get_first_url(self) -> str | None:
