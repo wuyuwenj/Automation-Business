@@ -451,13 +451,19 @@ def purchase_a2a(query: str, agent_url: str = "") -> dict:
 # ---------------------------------------------------------------------------
 
 @tool
-def discover_marketplace(category: str = "") -> dict:
+def discover_marketplace(category: str = "", force_refresh: bool = False) -> dict:
     """Load sellers from the marketplace into the registry.
 
     Args:
         category: Optional category filter.
+        force_refresh: If True, bypass the marketplace discovery cache.
     """
-    return discover_marketplace_impl(NVM_API_KEY, seller_registry, category)
+    return discover_marketplace_impl(
+        NVM_API_KEY,
+        seller_registry,
+        category,
+        force_refresh=force_refresh,
+    )
 
 
 @tool

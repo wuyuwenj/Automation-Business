@@ -1,8 +1,9 @@
 export interface Seller {
   url: string;
   name: string;
-  description: string;
-  skills: string[];
+  description?: string;
+  skills?: string[];
+  keywords?: string[];
   credits: number;
   cost_description: string;
 }
@@ -12,6 +13,24 @@ export interface LogEntry {
   component: string;
   action: string;
   message: string;
+}
+
+export interface ZeroClickOffer {
+  id: string;
+  title: string;
+  subtitle?: string;
+  content?: string;
+  cta?: string;
+  clickUrl: string;
+  imageUrl?: string;
+  brand?: {
+    name?: string;
+    url?: string;
+  };
+  price?: {
+    amount?: string;
+    currency?: string;
+  };
 }
 
 export interface ChatMessage {
@@ -36,6 +55,33 @@ export async function fetchBalance(): Promise<{
     return res.json();
   } catch {
     return null;
+  }
+}
+
+export async function fetchConfig(): Promise<{
+  zeroclickEnabled: boolean;
+  zeroclickQuery: string;
+} | null> {
+  try {
+    const res = await fetch("/api/config");
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchZeroClickOffers(query?: string): Promise<ZeroClickOffer[]> {
+  try {
+    const url = query
+      ? `/api/zeroclick/offers?query=${encodeURIComponent(query)}`
+      : "/api/zeroclick/offers";
+    const res = await fetch(url);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data.offers) ? data.offers : [];
+  } catch {
+    return [];
   }
 }
 

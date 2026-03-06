@@ -6,6 +6,11 @@ live sellers into the local SellerRegistry.
 """
 
 import asyncio
+import os
+import threading
+import time
+from copy import deepcopy
+from dataclasses import dataclass
 
 import httpx
 
@@ -15,6 +20,74 @@ _logger = get_logger("buyer.marketplace")
 
 # Short timeout for liveness pings — we just need to know the server responds
 _PING_TIMEOUT = 5.0
+_DEFAULT_CACHE_TTL = 300.0
+
+
+@dataclass
+class _CacheEntry:
+    """Cached marketplace discovery result for one normalized category."""
+
+    result: dict
+    timestamp: float
+    registered_count: int
+
+
+class _MarketplaceCache:
+    """Thread-safe TTL cache for marketplace discovery results."""
+
+    def __init__(self):
+        self._entries: dict[str, _CacheEntry] = {}
+        self._lock = threading.Lock()
+
+    def _normalize(self, category: str) -> str:
+        return category.strip().lower()
+
+    def _ttl_seconds(self) -> float:
+        raw = os.getenv("MARKETPLACE_CACHE_TTL", str(int(_DEFAULT_CACHE_TTL))).strip()
+        try:
+            ttl = float(raw)
+        except ValueError:
+            ttl = _DEFAULT_CACHE_TTL
+        return max(0.0, ttl)
+
+    def get(self, category: str) -> dict | None:
+        ttl = self._ttl_seconds()
+        if ttl <= 0:
+            return None
+
+        key = self._normalize(category)
+        now = time.monotonic()
+        with self._lock:
+            entry = self._entries.get(key)
+            if not entry:
+                return None
+            if now - entry.timestamp > ttl:
+                self._entries.pop(key, None)
+                return None
+            return deepcopy(entry.result)
+
+    def put(self, category: str, result: dict) -> None:
+        ttl = self._ttl_seconds()
+        key = self._normalize(category)
+        with self._lock:
+            if ttl <= 0:
+                self._entries.pop(key, None)
+                return
+            self._entries[key] = _CacheEntry(
+                result=deepcopy(result),
+                timestamp=time.monotonic(),
+                registered_count=int(result.get("registered_count", 0)),
+            )
+
+    def invalidate(self, category: str | None = None) -> None:
+        with self._lock:
+            if category is None:
+                self._entries.clear()
+                return
+            self._entries.pop(self._normalize(category), None)
+
+
+_marketplace_cache = _MarketplaceCache()
 
 
 async def _ping_one(url: str) -> tuple[str, bool]:
@@ -74,6 +147,7 @@ def discover_marketplace_impl(
     nvm_api_key: str,
     seller_registry,
     category: str = "",
+    force_refresh: bool = False,
 ) -> dict:
     """Query the hackathon Discovery API and register live sellers.
 
@@ -81,10 +155,26 @@ def discover_marketplace_impl(
         nvm_api_key: Nevermined API key for authentication.
         seller_registry: SellerRegistry instance to register sellers into.
         category: Optional category filter (e.g. "DeFi", "AI/ML").
+        force_refresh: If True, bypass the discovery cache for this call.
 
     Returns:
-        Dict with status, registered sellers count, and seller list.
+        Dict with status and registered seller counts.
     """
+    cache_label = category.strip() or "all"
+    if force_refresh:
+        log(_logger, "MARKETPLACE", "CACHE_BYPASS", f"category={cache_label}")
+    else:
+        cached = _marketplace_cache.get(category)
+        if cached:
+            log(
+                _logger,
+                "MARKETPLACE",
+                "CACHE_HIT",
+                f"category={cache_label} registered={cached.get('registered_count', 0)}",
+            )
+            return cached
+        log(_logger, "MARKETPLACE", "CACHE_MISS", f"category={cache_label}")
+
     base_url = "https://nevermined.ai/hackathon/register/api/discover"
     params = {"side": "sell"}
     if category:
@@ -192,9 +282,11 @@ def discover_marketplace_impl(
         if len(registered) > 3:
             lines.append(f"  ... and {len(registered) - 3} more. Use filter_sellers to find relevant ones.")
 
-    return {
+    result = {
         "status": "success",
         "content": [{"text": "\n".join(lines)}],
         "registered_count": len(registered),
         "skipped_count": skipped,
     }
+    _marketplace_cache.put(category, result)
+    return result
