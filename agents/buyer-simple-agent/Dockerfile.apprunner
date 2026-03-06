@@ -1,3 +1,16 @@
+FROM public.ecr.aws/docker/library/node:20-bookworm-slim AS frontend-builder
+
+WORKDIR /app/frontend
+
+COPY frontend/package.json frontend/package-lock.json ./
+
+RUN npm ci
+
+COPY frontend/ ./
+
+RUN npm run build
+
+
 FROM public.ecr.aws/docker/library/python:3.11-slim
 
 WORKDIR /app
@@ -15,8 +28,8 @@ RUN poetry config virtualenvs.create false \
 # Copy application code
 COPY src/ src/
 
-# Include the pre-built frontend
-COPY frontend/dist/ frontend/dist/
+# Build frontend during image creation so deployed assets match source
+COPY --from=frontend-builder /app/frontend/dist/ frontend/dist/
 
 ENV PORT=8080
 
