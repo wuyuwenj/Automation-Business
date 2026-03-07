@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 from uuid import uuid4
 
 import httpx
@@ -182,12 +183,23 @@ def purchase_http_impl(
             "payment-signature": access_token,
         }
 
+        # Extract URLs from query for sellers that expect structured input
+        _urls_in_query = re.findall(r'https?://[^\s,\'"]+', query)
+
         # Try multiple body formats — sellers use different schemas
         body_formats = [
             {"query": query},
             {"message": query},
             {"company": query, "input": query, "prompt": query},
         ]
+        # If query contains URLs, also try url/urls fields (web scrapers)
+        if _urls_in_query:
+            body_formats.insert(1, {
+                "urls": _urls_in_query,
+                "url": _urls_in_query[0],
+                "query": query,
+                "extractionInstructions": query,
+            })
         with httpx.Client(timeout=60.0, follow_redirects=True) as client:
             resp = client.post(agent_url, headers=headers, json=body_formats[0])
 

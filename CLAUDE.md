@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Git Rules
+
+- **NEVER push directly to `main`.** Always push to the feature branch and let the user merge to main (via PR or manually).
+
 ## Overview
 
 Repository containing working examples of AI agents with Nevermined payment integration. Each agent demonstrates a different protocol (x402, A2A, MCP) and deployment pattern.

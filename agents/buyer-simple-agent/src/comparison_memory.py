@@ -1,24 +1,23 @@
-"""Task-level two-seller comparison memory for the buyer agent.
+"""Category-level seller comparison memory with Supabase persistence.
 
-This module keeps a small persistent memory per task/query family so the buyer
-can compare two similar sellers across repeated runs:
+Tracks which sellers have been tested for each query category, their
+quality scores, and which seller is currently preferred. Supports N
+sellers per category (not limited to 2).
 
-- first run: test seller A
-- second run: test seller B
-- later runs: use the better-scoring seller
-- if both scores are weak: mark the task for re-browsing/discovery
+Also maintains a global seller blocklist — sellers that scored too low
+or failed repeatedly are automatically skipped.
 
-Local persistence is file-based for development. If Supabase environment
-variables are present, writes are also mirrored to a PostgREST table so the
-memory survives container restarts in hosted environments.
+Flow:
+- First query in a category: test the highest-relevance untested seller
+- Second query: test the next untested seller
+- After 2+ tested: exploit the best scorer (unless scores are weak)
+- Supabase is the primary store; local JSON is a write-through cache
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import re
 import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -27,6 +26,10 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
+
+from .log import get_logger, log
+
+_logger = get_logger("buyer.comparison")
 
 
 def _now_iso() -> str:
@@ -41,13 +44,31 @@ def _default_minimum_score() -> float:
         return 6.0
 
 
+# Auto-block thresholds
+_BLOCK_SCORE_THRESHOLD = int(os.getenv("BUYER_BLOCK_SCORE_THRESHOLD", "3"))
+_BLOCK_FAILURE_THRESHOLD = int(os.getenv("BUYER_BLOCK_FAILURE_THRESHOLD", "2"))
+
+
 @dataclass
-class ComparedSeller:
-    """Stored score state for one seller in a two-seller comparison."""
+class BlockedSeller:
+    """A seller that has been blocked from selection."""
 
     seller_url: str = ""
     seller_name: str = ""
-    tested: bool = False
+    reason: str = ""
+    blocked_at: str = field(default_factory=_now_iso)
+
+
+# ---------------------------------------------------------------------------
+# Data model
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SellerTestResult:
+    """Result from testing one seller for a category."""
+
+    seller_url: str = ""
+    seller_name: str = ""
     quality_score: float = 0.0
     roi: float = 0.0
     attempts: int = 0
@@ -57,53 +78,68 @@ class ComparedSeller:
 
 
 @dataclass
-class TaskComparisonRecord:
-    """Persistent comparison state for one normalized task."""
+class CategoryComparisonRecord:
+    """Tracks all sellers tested for a given query_category."""
 
-    task_key: str
-    query_category: str
-    query_preview: str
-    seller_a: ComparedSeller = field(default_factory=ComparedSeller)
-    seller_b: ComparedSeller = field(default_factory=ComparedSeller)
+    category: str
+    tested_sellers: list[SellerTestResult] = field(default_factory=list)
     preferred_seller_url: str = ""
     minimum_acceptable_score: float = field(default_factory=_default_minimum_score)
     needs_rebrowse: bool = False
     updated_at: str = field(default_factory=_now_iso)
 
     def __post_init__(self):
-        if isinstance(self.seller_a, dict):
-            self.seller_a = ComparedSeller(**self.seller_a)
-        if isinstance(self.seller_b, dict):
-            self.seller_b = ComparedSeller(**self.seller_b)
+        self.tested_sellers = [
+            SellerTestResult(**s) if isinstance(s, dict) else s
+            for s in self.tested_sellers
+        ]
 
-    def sellers(self) -> list[ComparedSeller]:
-        return [slot for slot in (self.seller_a, self.seller_b) if slot.seller_url]
+    def tested_urls(self) -> set[str]:
+        return {s.seller_url for s in self.tested_sellers if s.seller_url}
+
+    def get_result(self, seller_url: str) -> SellerTestResult | None:
+        return next(
+            (s for s in self.tested_sellers if s.seller_url == seller_url), None
+        )
 
 
-class TaskComparisonMemory:
-    """Thread-safe comparison memory with optional Supabase mirroring."""
+# ---------------------------------------------------------------------------
+# Comparison memory with Supabase persistence
+# ---------------------------------------------------------------------------
 
-    def __init__(self, path: str = "task_comparisons.json"):
+class CategoryComparisonMemory:
+    """Category-level comparison memory backed by Supabase + local JSON."""
+
+    def __init__(self, path: str = "category_comparisons.json"):
         self._path = Path(path)
         self._lock = threading.Lock()
-        self._records: dict[str, TaskComparisonRecord] = {}
+        self._records: dict[str, CategoryComparisonRecord] = {}
+        self._blocklist: dict[str, BlockedSeller] = {}
+        self._failure_counts: dict[str, int] = {}
         self._supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
         self._supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
         self._supabase_table = os.getenv(
-            "SUPABASE_TASK_COMPARISONS_TABLE",
-            "buyer_task_comparisons",
+            "SUPABASE_CATEGORY_COMPARISONS_TABLE",
+            "buyer_category_comparisons",
         )
         self._load_local()
+        self._load_manual_blocklist()
 
-    @staticmethod
-    def build_task_key(query: str, query_category: str = "") -> str:
-        """Normalize a question into a stable task key."""
-        normalized = re.sub(r"[^a-z0-9]+", " ", query.lower()).strip()
-        words = normalized.split()
-        slug = "-".join(words[:8]) or "task"
-        prefix = (query_category or "general").strip().lower() or "general"
-        digest = hashlib.sha1(f"{prefix}:{normalized}".encode("utf-8")).hexdigest()[:10]
-        return f"{prefix}:{slug[:64]}:{digest}"
+    # -- Local persistence ---------------------------------------------------
+
+    def _load_manual_blocklist(self) -> None:
+        """Load manually blocked sellers from BUYER_BLOCKED_SELLERS env var."""
+        raw = os.getenv("BUYER_BLOCKED_SELLERS", "").strip()
+        if not raw:
+            return
+        for url in raw.split(","):
+            url = url.strip()
+            if url and url not in self._blocklist:
+                self._blocklist[url] = BlockedSeller(
+                    seller_url=url, reason="manual (env var)")
+        if self._blocklist:
+            log(_logger, "COMPARISON", "BLOCKLIST",
+                f"loaded {len(self._blocklist)} manually blocked seller(s)")
 
     def _load_local(self) -> None:
         if not self._path.exists():
@@ -112,37 +148,44 @@ class TaskComparisonMemory:
             raw = json.loads(self._path.read_text())
         except (json.JSONDecodeError, OSError):
             return
-        comparisons = raw.get("comparisons", [])
-        for item in comparisons:
+        for item in raw.get("comparisons", []):
             try:
-                record = TaskComparisonRecord(**item)
+                record = CategoryComparisonRecord(**item)
             except TypeError:
                 continue
-            self._records[record.task_key] = record
+            self._records[record.category] = record
+        for item in raw.get("blocklist", []):
+            try:
+                entry = BlockedSeller(**item) if isinstance(item, dict) else item
+                self._blocklist[entry.seller_url] = entry
+            except (TypeError, AttributeError):
+                continue
 
     def _save_local(self) -> None:
         payload = {
-            "comparisons": [asdict(record) for record in self._records.values()],
+            "comparisons": [asdict(r) for r in self._records.values()],
+            "blocklist": [asdict(b) for b in self._blocklist.values()],
         }
         self._path.write_text(json.dumps(payload, indent=2))
+
+    # -- Supabase persistence ------------------------------------------------
 
     def _supabase_enabled(self) -> bool:
         return bool(self._supabase_url and self._supabase_key)
 
     def _supabase_headers(self) -> dict[str, str]:
-        token = self._supabase_key
         return {
-            "apikey": token,
-            "Authorization": f"Bearer {token}",
+            "apikey": self._supabase_key,
+            "Authorization": f"Bearer {self._supabase_key}",
             "Content-Type": "application/json",
         }
 
-    def _fetch_remote(self, task_key: str) -> TaskComparisonRecord | None:
+    def _fetch_remote(self, category: str) -> CategoryComparisonRecord | None:
         if not self._supabase_enabled():
             return None
         url = (
             f"{self._supabase_url}/rest/v1/{self._supabase_table}"
-            f"?task_key=eq.{quote(task_key, safe='')}&select=*"
+            f"?category=eq.{quote(category, safe='')}&select=*"
         )
         try:
             with httpx.Client(timeout=10.0) as client:
@@ -154,11 +197,11 @@ class TaskComparisonMemory:
         if not rows:
             return None
         try:
-            return TaskComparisonRecord(**rows[0])
+            return CategoryComparisonRecord(**rows[0])
         except TypeError:
             return None
 
-    def _upsert_remote(self, record: TaskComparisonRecord) -> None:
+    def _upsert_remote(self, record: CategoryComparisonRecord) -> None:
         if not self._supabase_enabled():
             return
         url = f"{self._supabase_url}/rest/v1/{self._supabase_table}"
@@ -168,95 +211,37 @@ class TaskComparisonMemory:
         try:
             with httpx.Client(timeout=10.0) as client:
                 client.post(url, headers=headers, json=body).raise_for_status()
-        except Exception:
-            # Remote sync is best-effort so local operation still succeeds.
-            return
+        except Exception as e:
+            log(_logger, "COMPARISON", "SUPABASE_ERROR",
+                f"upsert failed: {e}")
 
-    def get(self, task_key: str) -> TaskComparisonRecord | None:
+    # -- Public API ----------------------------------------------------------
+
+    def get_or_create(self, category: str) -> CategoryComparisonRecord:
+        """Get or create the comparison record for a category."""
+        cat = category.strip().lower()
         with self._lock:
-            local = self._records.get(task_key)
+            local = self._records.get(cat)
         if local:
             return local
-        remote = self._fetch_remote(task_key)
-        if not remote:
-            return None
+
+        # Try Supabase
+        remote = self._fetch_remote(cat)
+        if remote:
+            with self._lock:
+                self._records[cat] = remote
+                self._save_local()
+            return remote
+
+        # Create new
+        record = CategoryComparisonRecord(category=cat)
         with self._lock:
-            self._records[task_key] = remote
+            self._records[cat] = record
             self._save_local()
-        return remote
-
-    def get_for_query(self, query: str, query_category: str = "") -> TaskComparisonRecord | None:
-        return self.get(self.build_task_key(query, query_category))
-
-    def list_all(self) -> list[dict[str, Any]]:
-        with self._lock:
-            records = list(self._records.values())
-        return [asdict(record) for record in records]
-
-    def ensure_pair(
-        self,
-        query: str,
-        query_category: str,
-        candidate_sellers: list[dict],
-        exclude_urls: set[str] | None = None,
-        force_replace: bool = False,
-    ) -> TaskComparisonRecord | None:
-        """Create or refresh the two-seller comparison set for a task."""
-        task_key = self.build_task_key(query, query_category)
-        exclude_urls = exclude_urls or set()
-        candidate_pool = [
-            s for s in candidate_sellers
-            if s.get("url") and s["url"] not in exclude_urls
-        ]
-
-        with self._lock:
-            existing = self._records.get(task_key)
-            if existing and not force_replace:
-                existing_urls = {
-                    slot.seller_url
-                    for slot in existing.sellers()
-                    if slot.seller_url
-                }
-                available_urls = {s["url"] for s in candidate_pool}
-                if existing_urls and existing_urls.issubset(available_urls):
-                    return existing
-
-            if not candidate_pool:
-                return existing
-
-            seller_a = ComparedSeller(
-                seller_url=candidate_pool[0]["url"],
-                seller_name=candidate_pool[0].get("name", ""),
-            )
-            seller_b = ComparedSeller()
-            if len(candidate_pool) > 1:
-                seller_b = ComparedSeller(
-                    seller_url=candidate_pool[1]["url"],
-                    seller_name=candidate_pool[1].get("name", ""),
-                )
-
-            record = TaskComparisonRecord(
-                task_key=task_key,
-                query_category=query_category.lower(),
-                query_preview=query[:200],
-                seller_a=seller_a,
-                seller_b=seller_b,
-                minimum_acceptable_score=(
-                    existing.minimum_acceptable_score if existing else _default_minimum_score()
-                ),
-                preferred_seller_url="",
-                needs_rebrowse=False,
-                updated_at=_now_iso(),
-            )
-            self._records[task_key] = record
-            self._save_local()
-
-        self._upsert_remote(record)
         return record
 
     def record_result(
         self,
-        query: str,
         query_category: str,
         seller_url: str,
         seller_name: str,
@@ -264,49 +249,161 @@ class TaskComparisonMemory:
         roi: float,
         purchase_id: str = "",
         reasoning: str = "",
-    ) -> TaskComparisonRecord:
-        """Update the task comparison state after evaluating one seller."""
-        task_key = self.build_task_key(query, query_category)
-        record = self.get(task_key)
-        if not record:
-            record = self.ensure_pair(
-                query=query,
-                query_category=query_category,
-                candidate_sellers=[{"url": seller_url, "name": seller_name}],
-            )
-        if not record:
-            raise RuntimeError("Failed to initialize task comparison record")
+    ) -> CategoryComparisonRecord:
+        """Record a test result for a seller in a category."""
+        cat = query_category.strip().lower()
+        record = self.get_or_create(cat)
 
         with self._lock:
-            record = self._records[task_key]
-            slots = [record.seller_a, record.seller_b]
-            target = next((slot for slot in slots if slot.seller_url == seller_url), None)
-            if target is None:
-                target = next((slot for slot in slots if not slot.seller_url), None)
-            if target is None:
-                target = record.seller_b
+            record = self._records[cat]
 
-            target.seller_url = seller_url
-            target.seller_name = seller_name
-            target.tested = True
-            target.quality_score = float(quality_score)
-            target.roi = float(roi)
-            target.attempts += 1
-            target.last_purchase_id = purchase_id
-            target.last_reasoning = reasoning[:500]
-            target.last_tested_at = _now_iso()
+            # Find or create the seller entry
+            existing = record.get_result(seller_url)
+            if existing:
+                existing.quality_score = float(quality_score)
+                existing.roi = float(roi)
+                existing.attempts += 1
+                existing.last_purchase_id = purchase_id
+                existing.last_reasoning = reasoning[:500]
+                existing.last_tested_at = _now_iso()
+            else:
+                record.tested_sellers.append(SellerTestResult(
+                    seller_url=seller_url,
+                    seller_name=seller_name,
+                    quality_score=float(quality_score),
+                    roi=float(roi),
+                    attempts=1,
+                    last_purchase_id=purchase_id,
+                    last_reasoning=reasoning[:500],
+                    last_tested_at=_now_iso(),
+                ))
 
-            tested_slots = [slot for slot in record.sellers() if slot.tested]
-            if tested_slots:
-                best = max(tested_slots, key=lambda slot: (slot.quality_score, slot.roi))
+            # Recompute preferred seller
+            tested = [s for s in record.tested_sellers if s.attempts > 0]
+            if tested:
+                best = max(tested, key=lambda s: (s.quality_score, s.roi))
                 record.preferred_seller_url = best.seller_url
                 record.needs_rebrowse = (
-                    len(tested_slots) >= 2
+                    len(tested) >= 2
                     and best.quality_score < record.minimum_acceptable_score
                 )
+
             record.updated_at = _now_iso()
             self._save_local()
-            saved = self._records[task_key]
+            saved = self._records[cat]
 
         self._upsert_remote(saved)
+
+        log(_logger, "COMPARISON", "RECORDED",
+            f"category={cat} seller={seller_name} "
+            f"score={quality_score} tested={len(record.tested_sellers)}")
         return saved
+
+    def select_next_seller(
+        self,
+        query_category: str,
+        candidate_sellers: list[dict],
+        failed_sellers: set[str] | None = None,
+    ) -> dict | None:
+        """Return the next untested seller for this category, or None."""
+        cat = query_category.strip().lower()
+        record = self.get_or_create(cat)
+        tested = record.tested_urls()
+        failed = failed_sellers or set()
+
+        untested = [
+            s for s in candidate_sellers
+            if s["url"] not in tested and s["url"] not in failed
+        ]
+
+        if not untested:
+            return None
+
+        # Sort by relevance (from embeddings) desc, then cheapest
+        untested.sort(key=lambda s: (
+            -s.get("relevance_score", 0),
+            s.get("credits", 999),
+        ))
+        return untested[0]
+
+    def should_exploit(
+        self, query_category: str
+    ) -> tuple[bool, str | None]:
+        """Check if we've tested enough sellers to exploit the best one.
+
+        Returns (True, preferred_url) if 2+ sellers tested and winner found.
+        """
+        cat = query_category.strip().lower()
+        record = self.get_or_create(cat)
+        tested = [s for s in record.tested_sellers if s.attempts > 0]
+
+        if len(tested) < 2:
+            return False, None
+        if record.needs_rebrowse:
+            return False, None
+        if not record.preferred_seller_url:
+            return False, None
+        return True, record.preferred_seller_url
+
+    # -- Blocklist API -------------------------------------------------------
+
+    def is_blocked(self, seller_url: str) -> bool:
+        """Check if a seller is blocked."""
+        with self._lock:
+            return seller_url in self._blocklist
+
+    def get_blocked_urls(self) -> set[str]:
+        """Return all blocked seller URLs."""
+        with self._lock:
+            return set(self._blocklist.keys())
+
+    def block_seller(
+        self, seller_url: str, seller_name: str = "", reason: str = "",
+    ) -> None:
+        """Add a seller to the blocklist."""
+        with self._lock:
+            if seller_url in self._blocklist:
+                return
+            self._blocklist[seller_url] = BlockedSeller(
+                seller_url=seller_url,
+                seller_name=seller_name,
+                reason=reason,
+            )
+            self._save_local()
+        log(_logger, "COMPARISON", "BLOCKED",
+            f"{seller_name or seller_url}: {reason}")
+
+    def record_failure(self, seller_url: str, seller_name: str = "") -> bool:
+        """Record a purchase failure. Returns True if seller was auto-blocked."""
+        with self._lock:
+            self._failure_counts[seller_url] = self._failure_counts.get(seller_url, 0) + 1
+            count = self._failure_counts[seller_url]
+        if count >= _BLOCK_FAILURE_THRESHOLD:
+            self.block_seller(
+                seller_url, seller_name,
+                reason=f"auto: {count} consecutive failures",
+            )
+            return True
+        return False
+
+    def check_auto_block_score(
+        self, seller_url: str, seller_name: str, quality_score: float,
+    ) -> bool:
+        """Auto-block if score is below threshold. Returns True if blocked."""
+        if quality_score < _BLOCK_SCORE_THRESHOLD:
+            self.block_seller(
+                seller_url, seller_name,
+                reason=f"auto: score {quality_score}/8 < {_BLOCK_SCORE_THRESHOLD}",
+            )
+            return True
+        return False
+
+    def list_all(self) -> list[dict[str, Any]]:
+        """Return all comparison records as dicts."""
+        with self._lock:
+            records = list(self._records.values())
+        return [asdict(r) for r in records]
+
+
+# Backward-compatible alias
+TaskComparisonMemory = CategoryComparisonMemory

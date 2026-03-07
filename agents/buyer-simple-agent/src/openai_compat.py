@@ -2,7 +2,10 @@
 
 import os
 
+from openai import OpenAI
 from strands.models.openai import OpenAIModel
+
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
 
 def validate_openai_config() -> str | None:
@@ -41,6 +44,14 @@ def build_openai_client_args() -> dict:
             "Authorization": f"Bearer {bearer_token}",
         }
     return client_args
+
+
+def create_embedding_client() -> OpenAI:
+    """Create a raw OpenAI client for embedding requests.
+
+    Uses the same OPENAI_BASE_URL and OPENAI_BEARER_TOKEN as the chat model.
+    """
+    return OpenAI(**build_openai_client_args())
 
 
 def create_openai_model() -> OpenAIModel:

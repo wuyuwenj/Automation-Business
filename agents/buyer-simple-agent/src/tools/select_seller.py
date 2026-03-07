@@ -1,13 +1,13 @@
 """Seller selection tool using explore/exploit logic.
 
-Checks purchase history, compares seller ROI, and decides whether to
-use a proven seller or explore a new one. Logs reasoning explicitly
-for hackathon judges to see.
+Uses category-level comparison memory to track which sellers have been
+tested. Picks untested sellers first (explore), then reuses the best
+performer once 2+ sellers are tested (exploit).
 """
 
-import random
+from openai import OpenAI
 
-from ..comparison_memory import TaskComparisonMemory
+from ..comparison_memory import CategoryComparisonMemory
 from ..ledger import PurchaseLedger
 from ..log import get_logger, log
 from ..registry import SellerRegistry
@@ -15,19 +15,68 @@ from .filter_sellers import rank_sellers_for_query
 
 _logger = get_logger("buyer.select")
 
-# Probability of exploring a new seller even when an exploit choice exists
-EXPLORE_PROBABILITY = 0.2
+# Marketplace categories from Nevermined Discovery API + common task types
+_KNOWN_CATEGORIES = [
+    "DeFi", "Data Analytics", "AI/ML", "RegTech", "IoT", "Security",
+    "Infrastructure", "Identity", "Social", "Gaming", "API Services",
+    "Agent Match Maker", "Agent Review Board", "Banking, Capital",
+    "Business Intelligence", "Business Operations", "Dynamic pricing",
+    "Fast cleaning service", "Grocery", "Marketing & Advertising",
+    "Premium cleaning services", "Quality Assurance", "Research",
+    "Research & Analysis", "Trust & Compliance", "memory",
+    "Web Scraping",
+]
 
-# Maximum failed explores before falling back to a known-good seller
-MAX_FAILED_EXPLORES = 2
+
+# Normalize category names so old and new data stay consistent
+_CATEGORY_ALIASES = {
+    "web scraping": "scraping",
+}
+
+
+def _classify_query(query: str, client: OpenAI | None) -> str:
+    """Classify a query into one marketplace category using LLM."""
+    if not client:
+        return ""
+    categories_str = ", ".join(_KNOWN_CATEGORIES)
+    try:
+        resp = client.chat.completions.create(
+            model="openai/gpt-4.1-nano",
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Classify this query into exactly ONE category from the list below. "
+                    f"Reply with ONLY the category name, nothing else.\n\n"
+                    f"Categories: {categories_str}\n\n"
+                    f"Query: {query}"
+                ),
+            }],
+            max_tokens=20,
+            temperature=0,
+        )
+        raw = resp.choices[0].message.content.strip().strip('"').strip("'")
+        # Match against known categories (case-insensitive)
+        for cat in _KNOWN_CATEGORIES:
+            if raw.lower() == cat.lower():
+                result = _CATEGORY_ALIASES.get(cat.lower(), cat.lower())
+                log(_logger, "SELECT", "CLASSIFY", f"'{query[:50]}' → {result}")
+                return result
+        # Partial match fallback
+        for cat in _KNOWN_CATEGORIES:
+            if cat.lower() in raw.lower() or raw.lower() in cat.lower():
+                result = _CATEGORY_ALIASES.get(cat.lower(), cat.lower())
+                log(_logger, "SELECT", "CLASSIFY", f"'{query[:50]}' → {result} (fuzzy)")
+                return result
+        log(_logger, "SELECT", "CLASSIFY", f"no match for '{raw}', using raw")
+        result = raw.lower()
+        return _CATEGORY_ALIASES.get(result, result)
+    except Exception as e:
+        log(_logger, "SELECT", "CLASSIFY", f"failed: {e}")
+        return ""
 
 
 def _sort_candidates(sellers: list[dict]) -> list[dict]:
-    """Sort sellers: agent_id resolved first, then free-plan, then by credits ascending.
-
-    Sellers without a resolved agent_id are very likely to fail (403) because
-    their Discovery API plan IDs don't match the sandbox environment.
-    """
+    """Sort sellers: agent_id resolved first, then free-plan, then cheapest."""
     return sorted(sellers, key=lambda s: (
         0 if s.get("has_agent_id") else 1,
         0 if s.get("has_free_plan") else 1,
@@ -40,8 +89,9 @@ def select_seller_impl(
     query_category: str,
     seller_registry: SellerRegistry,
     ledger: PurchaseLedger,
-    comparison_memory: TaskComparisonMemory | None = None,
+    comparison_memory: CategoryComparisonMemory | None = None,
     failed_sellers: set[str] | None = None,
+    embedding_client: OpenAI | None = None,
 ) -> dict:
     """Select the best seller for a query using explore/exploit logic.
 
@@ -50,12 +100,28 @@ def select_seller_impl(
         query_category: Classified category (e.g. "research", "sentiment").
         seller_registry: Registry of available sellers.
         ledger: Purchase ledger with history.
+        comparison_memory: Category-level comparison state.
         failed_sellers: Set of seller URLs that failed during this session.
-
-    Returns:
-        Dict with selected seller info and reasoning.
+        embedding_client: OpenAI client for embedding-based ranking.
     """
+    # Auto-classify query into a marketplace category
+    classified = _classify_query(query, embedding_client)
+    if classified:
+        query_category = classified
+
     all_sellers = seller_registry.list_all(verbose=True)
+
+    # Filter out blocked sellers (persistent blocklist)
+    blocked_count = 0
+    if comparison_memory:
+        blocked_urls = comparison_memory.get_blocked_urls()
+        if blocked_urls:
+            pre_block = len(all_sellers)
+            all_sellers = [s for s in all_sellers if s["url"] not in blocked_urls]
+            blocked_count = pre_block - len(all_sellers)
+            if blocked_count:
+                log(_logger, "SELECT", "FILTER",
+                    f"Skipped {blocked_count} blocked seller(s)")
 
     # Filter out sellers that failed during this session
     failed_count = 0
@@ -72,242 +138,94 @@ def select_seller_impl(
         if failed_count:
             msg += f" ({failed_count} seller(s) were skipped due to previous failures.)"
         msg += " Use discover_marketplace first."
-        return {
-            "status": "error",
-            "content": [{"text": msg}],
-        }
+        return {"status": "error", "content": [{"text": msg}]}
 
-    seller_map = {seller["url"]: seller for seller in all_sellers}
+    # Rank candidates using embeddings (or keyword fallback)
     ranked_candidates = rank_sellers_for_query(
         query,
         sellers=all_sellers,
-        max_results=max(5, len(all_sellers)),
+        max_results=10,
+        embedding_client=embedding_client,
     )
     relevant_candidates = [
-        seller for seller in ranked_candidates
-        if seller.get("relevance_score", 0) > 0
+        s for s in ranked_candidates if s.get("relevance_score", 0) > 0
     ]
     if not relevant_candidates:
         relevant_candidates = _sort_candidates(all_sellers)
 
-    if comparison_memory:
-        comparison = comparison_memory.get_for_query(query, query_category)
-        if comparison and comparison.needs_rebrowse:
-            previous_urls = {
-                slot.seller_url for slot in comparison.sellers() if slot.seller_url
-            }
-            if len(relevant_candidates) > len(previous_urls):
-                comparison = comparison_memory.ensure_pair(
-                    query=query,
-                    query_category=query_category,
-                    candidate_sellers=relevant_candidates,
-                    exclude_urls=previous_urls,
-                    force_replace=True,
-                )
-        else:
-            comparison = comparison_memory.ensure_pair(
-                query=query,
-                query_category=query_category,
-                candidate_sellers=relevant_candidates,
-            )
-
-        if comparison:
-            pair_slots = [comparison.seller_a, comparison.seller_b]
-            pair_sellers = [
-                seller_map[slot.seller_url]
-                for slot in pair_slots
-                if slot.seller_url in seller_map
-            ]
-            if pair_sellers:
-                untested_slots = [
-                    slot for slot in pair_slots
-                    if slot.seller_url and not slot.tested and slot.seller_url in seller_map
-                ]
-                if untested_slots:
-                    slot = untested_slots[0]
-                    selected = seller_map[slot.seller_url]
-                    tested_count = sum(1 for pair_slot in pair_slots if pair_slot.tested)
-                    decision = (
-                        f"TASK_COMPARE: task pair for '{query_category}' is "
-                        f"'{comparison.seller_a.seller_name or comparison.seller_a.seller_url}' vs "
-                        f"'{comparison.seller_b.seller_name or comparison.seller_b.seller_url or 'pending'}'. "
-                        f"Selecting '{selected['name']}' as comparison step {tested_count + 1}/2."
-                    )
-                    log(_logger, "SELECT", "DECISION", decision)
-                    return {
-                        "status": "success",
-                        "content": [{"text": "\n".join([
-                            f"Seller selection for category '{query_category}':",
-                            f"  Task key: {comparison.task_key}",
-                            f"  Selected: {selected['name']} ({selected['url']})",
-                            f"  Cost: {selected['cost_description'] or str(selected['credits']) + ' credit(s)'}",
-                            f"  Decision: {decision}",
-                            f"  Pair: {comparison.seller_a.seller_name or comparison.seller_a.seller_url} vs "
-                            f"{comparison.seller_b.seller_name or comparison.seller_b.seller_url or 'pending'}",
-                        ])}],
-                        "selected_seller": {
-                            "name": selected["name"],
-                            "url": selected["url"],
-                            "credits": selected["credits"],
-                            "cost_description": selected["cost_description"],
-                        },
-                        "decision": decision,
-                        "phase": "compare",
-                        "task_key": comparison.task_key,
-                    }
-
-                preferred_url = comparison.preferred_seller_url
-                preferred = seller_map.get(preferred_url, None) if preferred_url else None
-                if preferred and not comparison.needs_rebrowse:
-                    decision = (
-                        f"TASK_EXPLOIT: Reusing preferred seller '{preferred['name']}' for task "
-                        f"'{comparison.task_key}'. Stored pair scores are above the minimum "
-                        f"acceptable score ({comparison.minimum_acceptable_score:.1f})."
-                    )
-                    log(_logger, "SELECT", "DECISION", decision)
-                    return {
-                        "status": "success",
-                        "content": [{"text": "\n".join([
-                            f"Seller selection for category '{query_category}':",
-                            f"  Task key: {comparison.task_key}",
-                            f"  Selected: {preferred['name']} ({preferred['url']})",
-                            f"  Cost: {preferred['cost_description'] or str(preferred['credits']) + ' credit(s)'}",
-                            f"  Decision: {decision}",
-                            f"  Pair scores: "
-                            f"{comparison.seller_a.seller_name or comparison.seller_a.seller_url}="
-                            f"{comparison.seller_a.quality_score:.1f}, "
-                            f"{comparison.seller_b.seller_name or comparison.seller_b.seller_url}="
-                            f"{comparison.seller_b.quality_score:.1f}",
-                        ])}],
-                        "selected_seller": {
-                            "name": preferred["name"],
-                            "url": preferred["url"],
-                            "credits": preferred["credits"],
-                            "cost_description": preferred["cost_description"],
-                        },
-                        "decision": decision,
-                        "phase": "exploit",
-                        "task_key": comparison.task_key,
-                    }
-
-    # Get which sellers we've tried for this category
-    tried_urls = ledger.get_sellers_tried_for_category(query_category)
-    category_stats = ledger.get_category_stats(query_category)
-
-    # Separate tried vs untried sellers
-    tried = [s for s in all_sellers if s["url"] in tried_urls]
-    untried = [s for s in all_sellers if s["url"] not in tried_urls]
-
-    # If too many failed explores this session, skip exploration and use known-good
-    # Look for known-good sellers from ANY category (not just current)
-    best_global_url = ledger.get_best_seller_url()
-    has_known_good = best_global_url and any(s["url"] == best_global_url for s in all_sellers)
-    should_force_exploit = failed_count >= MAX_FAILED_EXPLORES and (tried or has_known_good)
-
+    seller_map = {s["url"]: s for s in all_sellers}
     decision = ""
     selected = None
 
-    if should_force_exploit:
-        # Too many failures — fall back to best known-good seller
-        # Try category-specific best first, then global best
-        best_url = category_stats.get("best_seller", {}).get("url") or best_global_url
-        selected = next(
-            (s for s in all_sellers if s["url"] == best_url),
-            tried[0] if tried else all_sellers[0],
+    # -- Comparison memory path: always explore untested sellers first --------
+    if comparison_memory:
+        # Pick the next untested seller — try relevant first, then all
+        next_seller = comparison_memory.select_next_seller(
+            query_category, relevant_candidates, failed_sellers,
         )
-        source = "this category" if best_url != best_global_url else "all categories"
-        decision = (
-            f"EXPLOIT (failsafe): {failed_count} seller(s) failed this session. "
-            f"Falling back to best seller '{selected['name']}' (from {source}) "
-            f"instead of continuing to explore."
-        )
+        if not next_seller:
+            # Relevant candidates exhausted — try ALL sellers before exploiting
+            next_seller = comparison_memory.select_next_seller(
+                query_category, _sort_candidates(all_sellers), failed_sellers,
+            )
+        if next_seller:
+            record = comparison_memory.get_or_create(query_category)
+            tested_count = len(record.tested_urls())
+            total = len(all_sellers)
+            free_tag = " (FREE plan)" if next_seller.get("has_free_plan") else ""
+            decision = (
+                f"EXPLORE: Testing '{next_seller['name']}'{free_tag} for category "
+                f"'{query_category}'. {tested_count}/{total} seller(s) tested so far."
+            )
+            log(_logger, "SELECT", "DECISION", decision)
+            return _build_result(next_seller, decision, "compare", query_category, record)
 
-    elif not tried_urls:
-        # EXPLORE: Never bought in this category before
-        # Pick free-plan seller first, then cheapest
+        # Every seller tested — exploit the best
+        record = comparison_memory.get_or_create(query_category)
+        tested_count = len([s for s in record.tested_sellers if s.attempts > 0])
+        preferred_url = record.preferred_seller_url
+        if preferred_url:
+            preferred = seller_map.get(preferred_url)
+            if preferred:
+                decision = (
+                    f"EXPLOIT: All {tested_count} sellers tested for '{query_category}'. "
+                    f"Reusing best performer '{preferred['name']}'."
+                )
+                log(_logger, "SELECT", "DECISION", decision)
+                return _build_result(preferred, decision, "exploit", query_category, record)
+
+    # -- Fallback: ledger-based explore/exploit ------------------------------
+    tried_urls = ledger.get_sellers_tried_for_category(query_category)
+
+    if not tried_urls:
         candidates = _sort_candidates(all_sellers)
         selected = candidates[0]
         free_tag = " (FREE plan)" if selected.get("has_free_plan") else ""
         decision = (
             f"EXPLORE: No purchase history for category '{query_category}'. "
-            f"Starting with '{selected['name']}'{free_tag} "
-            f"({selected['credits']} credit(s)) to minimize exploration cost."
+            f"Starting with '{selected['name']}'{free_tag}."
+        )
+    else:
+        best_url = ledger.get_best_seller_url()
+        selected = next(
+            (s for s in all_sellers if s["url"] == best_url),
+            all_sellers[0],
+        )
+        decision = (
+            f"EXPLOIT (ledger fallback): Selecting '{selected['name']}' "
+            f"as best known performer."
         )
 
-    elif len(tried_urls) < 2:
-        # EXPLORE: Only tried one seller, need comparison
-        if untried:
-            candidates = _sort_candidates(untried)
-            selected = candidates[0]
-            free_tag = " (FREE plan)" if selected.get("has_free_plan") else ""
-            decision = (
-                f"EXPLORE: Only tried 1 seller for '{query_category}'. "
-                f"Trying '{selected['name']}'{free_tag} for comparison. "
-                f"Need at least 2 sellers to make an informed decision."
-            )
-        else:
-            # All sellers tried, exploit the best
-            best_url = category_stats.get("best_seller", {}).get("url")
-            selected = next((s for s in all_sellers if s["url"] == best_url), all_sellers[0])
-            decision = (
-                f"EXPLOIT: All available sellers already tried for '{query_category}'. "
-                f"Selecting best performer '{selected['name']}' "
-                f"(avg ROI: {category_stats['best_seller'].get('avg_roi', '?')})."
-            )
-
-    else:
-        # 2+ sellers tried: EXPLOIT (80%) or EXPLORE (20%)
-        should_explore = untried and random.random() < EXPLORE_PROBABILITY
-
-        if should_explore:
-            candidates = _sort_candidates(untried)
-            selected = candidates[0]
-            free_tag = " (FREE plan)" if selected.get("has_free_plan") else ""
-            decision = (
-                f"EXPLORE (periodic re-evaluation): Already tried {len(tried_urls)} sellers "
-                f"for '{query_category}', but checking if '{selected['name']}'{free_tag} "
-                f"offers better value."
-            )
-        else:
-            # EXPLOIT: pick highest ROI seller
-            best_url = category_stats.get("best_seller", {}).get("url")
-            best_stats = category_stats.get("by_seller", {}).get(best_url, {})
-            selected = next((s for s in all_sellers if s["url"] == best_url), tried[0] if tried else all_sellers[0])
-
-            # Build comparison string
-            comparison_parts = []
-            for url, stats in category_stats.get("by_seller", {}).items():
-                marker = " (BEST)" if url == best_url else ""
-                comparison_parts.append(
-                    f"{stats['name']}: avg ROI {stats['avg_roi']:.1f} "
-                    f"over {stats['purchases']} purchase(s){marker}"
-                )
-
-            decision = (
-                f"EXPLOIT: Selecting '{selected['name']}' — best ROI for '{query_category}'. "
-                f"Comparison: {' | '.join(comparison_parts)}. "
-                f"Reason: Higher quality per credit based on {best_stats.get('purchases', 0)} "
-                f"previous purchase(s)."
-            )
-
     log(_logger, "SELECT", "DECISION", decision)
-
-    lines = [
-        f"Seller selection for category '{query_category}':",
-        f"  Selected: {selected['name']} ({selected['url']})",
-        f"  Cost: {selected['cost_description'] or str(selected['credits']) + ' credit(s)'}",
-        f"  Free plan: {'yes' if selected.get('has_free_plan') else 'no'}",
-        f"  Decision: {decision}",
-        "",
-        f"  Available sellers: {len(all_sellers)}",
-        f"  Tried for this category: {len(tried_urls)}",
-        f"  Untried: {len(untried)}",
-        f"  Failed this session: {failed_count}",
-    ]
-
     return {
         "status": "success",
-        "content": [{"text": "\n".join(lines)}],
+        "content": [{"text": "\n".join([
+            f"Seller selection for category '{query_category}':",
+            f"  Selected: {selected['name']} ({selected['url']})",
+            f"  Cost: {selected['cost_description'] or str(selected['credits']) + ' credit(s)'}",
+            f"  Decision: {decision}",
+            f"  Available: {len(all_sellers)} | Failed: {failed_count}",
+        ])}],
         "selected_seller": {
             "name": selected["name"],
             "url": selected["url"],
@@ -316,4 +234,43 @@ def select_seller_impl(
         },
         "decision": decision,
         "phase": "explore" if "EXPLORE" in decision else "exploit",
+    }
+
+
+def _build_result(
+    seller: dict,
+    decision: str,
+    phase: str,
+    query_category: str,
+    record=None,
+) -> dict:
+    """Build a standardized selection result."""
+    lines = [
+        f"Seller selection for category '{query_category}':",
+        f"  Selected: {seller['name']} ({seller['url']})",
+        f"  Cost: {seller.get('cost_description') or str(seller.get('credits', 1)) + ' credit(s)'}",
+        f"  Decision: {decision}",
+    ]
+    if record:
+        tested_count = len([s for s in record.tested_sellers if s.attempts > 0])
+        lines.append(f"  Sellers tested in category: {tested_count}")
+        if record.preferred_seller_url:
+            pref = record.get_result(record.preferred_seller_url)
+            if pref:
+                lines.append(
+                    f"  Current best: {pref.seller_name} "
+                    f"(score={pref.quality_score:.1f})"
+                )
+
+    return {
+        "status": "success",
+        "content": [{"text": "\n".join(lines)}],
+        "selected_seller": {
+            "name": seller["name"],
+            "url": seller["url"],
+            "credits": seller.get("credits", 1),
+            "cost_description": seller.get("cost_description", ""),
+        },
+        "decision": decision,
+        "phase": phase,
     }

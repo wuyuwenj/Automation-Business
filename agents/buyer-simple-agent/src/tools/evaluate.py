@@ -4,7 +4,7 @@ After each purchase, the agent calls this to score the response
 on 4 dimensions, calculate ROI, and record in the purchase ledger.
 """
 
-from ..comparison_memory import TaskComparisonMemory
+from ..comparison_memory import CategoryComparisonMemory
 from ..ledger import Evaluation, PurchaseLedger
 from ..log import get_logger, log
 
@@ -13,7 +13,7 @@ _logger = get_logger("buyer.evaluate")
 
 def evaluate_purchase_impl(
     ledger: PurchaseLedger,
-    comparison_memory: TaskComparisonMemory | None,
+    comparison_memory: CategoryComparisonMemory | None,
     query: str,
     query_category: str,
     seller_url: str,
@@ -30,6 +30,7 @@ def evaluate_purchase_impl(
 
     Args:
         ledger: PurchaseLedger instance.
+        comparison_memory: Category-level comparison memory.
         query: The original query sent to the seller.
         query_category: Category of the query (e.g. "research", "sentiment").
         seller_url: URL of the seller.
@@ -63,10 +64,10 @@ def evaluate_purchase_impl(
         evaluation=evaluation,
     )
 
-    task_comparison = None
+    comparison_record = None
+    auto_blocked = False
     if comparison_memory:
-        task_comparison = comparison_memory.record_result(
-            query=query,
+        comparison_record = comparison_memory.record_result(
             query_category=query_category,
             seller_url=seller_url,
             seller_name=seller_name,
@@ -75,55 +76,49 @@ def evaluate_purchase_impl(
             purchase_id=record.id,
             reasoning=reasoning,
         )
+        auto_blocked = comparison_memory.check_auto_block_score(
+            seller_url, seller_name, record.quality_score,
+        )
 
     log(_logger, "EVALUATE", "SCORED",
         f"{seller_name}: quality={record.quality_score}/8 roi={record.roi:.1f} "
         f"[rel={relevance} dep={depth} act={actionability} spec={specificity}]")
 
-    # Get comparison data
-    seller_stats = ledger.get_seller_stats(seller_url)
-    category_stats = ledger.get_category_stats(query_category)
-
     lines = [
         f"Evaluation recorded for purchase from {seller_name}:",
-        f"  Task key: {(task_comparison.task_key if task_comparison else ledger.make_task_key(query, query_category))}",
+        f"  Category: {query_category}",
         f"  Quality: {record.quality_score}/8 "
         f"(relevance={relevance}, depth={depth}, actionability={actionability}, specificity={specificity})",
         f"  Cost: {credits_spent} credit(s)",
         f"  ROI: {record.roi:.1f} (quality per credit)",
         f"  Reasoning: {reasoning}",
-        "",
-        f"Seller lifetime stats ({seller_name}):",
-        f"  Total purchases: {seller_stats.get('total_purchases', 0)}",
-        f"  Avg quality: {seller_stats.get('avg_quality', 0)}/8",
-        f"  Avg ROI: {seller_stats.get('avg_roi', 0):.1f}",
     ]
 
-    if category_stats.get("total_purchases", 0) > 1:
-        lines.append(f"\nCategory '{query_category}' comparison:")
-        lines.append(f"  Sellers tried: {len(category_stats.get('sellers_tried', []))}")
-        by_seller = category_stats.get("by_seller", {})
-        for url, stats in by_seller.items():
-            marker = " <-- BEST" if url == category_stats.get("best_seller", {}).get("url") else ""
-            lines.append(
-                f"  {stats['name']}: avg ROI {stats['avg_roi']:.1f} "
-                f"({stats['purchases']} purchases){marker}"
-            )
-
-    if task_comparison:
-        preferred = task_comparison.preferred_seller_url or "not decided yet"
+    if comparison_record:
+        tested = [s for s in comparison_record.tested_sellers if s.attempts > 0]
+        tested_count = len(tested)
+        preferred = comparison_record.preferred_seller_url or "not decided yet"
         lines.extend([
             "",
-            "Task comparison memory:",
-            f"  Pair: {task_comparison.seller_a.seller_name or task_comparison.seller_a.seller_url} vs "
-            f"{task_comparison.seller_b.seller_name or task_comparison.seller_b.seller_url or 'pending'}",
-            f"  Preferred seller URL: {preferred}",
-            f"  Needs re-browse: {'yes' if task_comparison.needs_rebrowse else 'no'}",
-            f"  Minimum acceptable score: {task_comparison.minimum_acceptable_score:.1f}",
+            f"Category '{query_category}' comparison ({tested_count} seller(s) tested):",
         ])
+        for s in tested:
+            marker = " <-- BEST" if s.seller_url == comparison_record.preferred_seller_url else ""
+            lines.append(
+                f"  {s.seller_name}: score={s.quality_score:.1f}/8 "
+                f"({s.attempts} attempt(s)){marker}"
+            )
+        if auto_blocked:
+            lines.append(f"  ** {seller_name} AUTO-BLOCKED (score too low) — will be skipped in future selections.")
+        if tested_count < 2:
+            lines.append(f"  Need {2 - tested_count} more seller(s) before exploiting best.")
+        elif comparison_record.needs_rebrowse:
+            lines.append(f"  All scores below {comparison_record.minimum_acceptable_score:.0f}/8 — consider browsing for better sellers.")
+        else:
+            lines.append(f"  Preferred seller: {preferred}")
 
     log(_logger, "EVALUATE", "COMPARISON",
-        f"category={query_category} sellers_tried={len(category_stats.get('sellers_tried', []))}")
+        f"category={query_category} tested={len(comparison_record.tested_sellers) if comparison_record else 0}")
 
     return {
         "status": "success",
@@ -131,6 +126,4 @@ def evaluate_purchase_impl(
         "purchase_id": record.id,
         "quality_score": record.quality_score,
         "roi": record.roi,
-        "seller_stats": seller_stats,
-        "category_stats": category_stats,
     }
